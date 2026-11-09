@@ -161,6 +161,76 @@ describe('claim lease and failed cleanup', () => {
     expect(await healthy.run('p-9', 'k-lease', 'h', fn)).toMatchObject({ replayed: true });
   });
 
+  /** A claims, outlives its lease, B takes over and completes; returns what A needs to finish late. */
+  async function staleScenario(key: string) {
+    let t = Date.parse('2026-11-09T12:00:00Z');
+    const a = new IdempotencyRepo(doc, table, () => t);
+    let releaseA: () => void = () => {};
+    let startedA: () => void = () => {};
+    const gateA = new Promise<void>((r) => (releaseA = r));
+    const aRunning = new Promise<void>((r) => (startedA = r));
+    const finishA = (outcome: 'ok' | 'fail') =>
+      a.run('p-8', key, 'h', async () => {
+        startedA();
+        await gateA;
+        if (outcome === 'fail') throw new Error('A failed');
+        return { status: 200, body: { by: 'A' } };
+      });
+    return {
+      finishA,
+      releaseA: () => releaseA(),
+      aRunning,
+      async completeB() {
+        t += (IDEMPOTENCY_LEASE_SECONDS + 1) * 1000;
+        const b = new IdempotencyRepo(doc, table, () => t);
+        return { b, first: await b.run('p-8', key, 'h', async () => ({ status: 200, body: { by: 'B' } })) };
+      },
+    };
+  }
+
+  it('keeps the new owner response when a stale owner fails after the takeover', async () => {
+    const s = await staleScenario('k-stale-fail');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const aRun = s.finishA('fail').catch((e: unknown) => e);
+      await s.aRunning;
+      const { b, first } = await s.completeB();
+      expect(first).toMatchObject({ body: { by: 'B' }, replayed: false });
+      s.releaseA();
+      expect(await aRun).toMatchObject({ message: 'A failed' });
+      expect(log.mock.calls.map((c) => JSON.parse(String(c[0])).msg)).toEqual(['idempotency_stale_owner']);
+      expect(await b.run('p-8', 'k-stale-fail', 'h', async () => ({ status: 500, body: {} }))).toEqual({
+        status: 200,
+        body: { by: 'B' },
+        replayed: true,
+      });
+    } finally {
+      s.releaseA();
+      log.mockRestore();
+    }
+  });
+
+  it('keeps the new owner response when a stale owner succeeds after the takeover', async () => {
+    const s = await staleScenario('k-stale-ok');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const aRun = s.finishA('ok');
+      await s.aRunning;
+      const { b } = await s.completeB();
+      s.releaseA();
+      expect(await aRun).toEqual({ status: 200, body: { by: 'A' }, replayed: false });
+      expect(log.mock.calls.map((c) => JSON.parse(String(c[0])).msg)).toEqual(['idempotency_stale_owner']);
+      expect(await b.run('p-8', 'k-stale-ok', 'h', async () => ({ status: 500, body: {} }))).toEqual({
+        status: 200,
+        body: { by: 'B' },
+        replayed: true,
+      });
+    } finally {
+      s.releaseA();
+      log.mockRestore();
+    }
+  });
+
   it('lets only one of two concurrent takeovers of an expired lease run fn', async () => {
     let t = Date.parse('2026-11-09T12:00:00Z');
     const flaky = new IdempotencyRepo(failingDeletes(), table, () => t);

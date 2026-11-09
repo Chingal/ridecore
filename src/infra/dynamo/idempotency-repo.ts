@@ -1,6 +1,6 @@
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { DeleteCommand, type DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from '../../domain/errors.ts';
 import { idempotencyKey } from './keys.ts';
 
@@ -51,6 +51,7 @@ export class IdempotencyRepo {
     fn: () => Promise<{ status: number; body: T }>,
   ): Promise<IdempotentResult<T>> {
     const Key = idempotencyKey(actorId, key);
+    const owner = randomUUID();
     try {
       await this.doc.send(
         new PutCommand({
@@ -59,6 +60,7 @@ export class IdempotencyRepo {
             ...Key,
             entity: 'IDEMPOTENCY',
             requestHash,
+            owner,
             createdAt: new Date().toISOString(),
             expiresAt: this.nowSeconds() + IDEMPOTENCY_TTL_SECONDS,
             leaseUntil: this.nowSeconds() + IDEMPOTENCY_LEASE_SECONDS,
@@ -68,10 +70,10 @@ export class IdempotencyRepo {
       );
     } catch (err) {
       if (!(err instanceof ConditionalCheckFailedException)) throw err;
-      const taken = await this.existing<T>(Key, requestHash);
+      const taken = await this.existing<T>(Key, requestHash, owner);
       if (taken.replay !== undefined) return taken.replay;
     }
-    return this.execute(actorId, key, Key, fn);
+    return this.execute(actorId, key, Key, owner, fn);
   }
 
   private nowSeconds(): number {
@@ -83,6 +85,7 @@ export class IdempotencyRepo {
     actorId: string,
     key: string,
     Key: { PK: string; SK: string },
+    owner: string,
     fn: () => Promise<{ status: number; body: T }>,
   ): Promise<IdempotentResult<T>> {
     let result: { status: number; body: T };
@@ -91,7 +94,21 @@ export class IdempotencyRepo {
     } catch (err) {
       // Free the key so the client can retry. A failed cleanup must not mask the original error; it is
       // logged, and the claim's lease expiry lets a later retry take the key over.
-      await this.doc.send(new DeleteCommand({ TableName: this.tableName, Key })).catch((cleanupErr: unknown) => {
+      await this.doc
+        .send(
+          new DeleteCommand({
+            TableName: this.tableName,
+            Key,
+            ConditionExpression: '#owner = :me',
+            ExpressionAttributeNames: { '#owner': 'owner' },
+            ExpressionAttributeValues: { ':me': owner },
+          }),
+        )
+        .catch((cleanupErr: unknown) => {
+        if (cleanupErr instanceof ConditionalCheckFailedException) {
+          logStale(actorId, key, 'delete');
+          return;
+        }
         console.error(
           JSON.stringify({
             level: 'error',
@@ -104,15 +121,22 @@ export class IdempotencyRepo {
       });
       throw err;
     }
-    await this.doc.send(
-      new UpdateCommand({
-        TableName: this.tableName,
-        Key,
-        UpdateExpression: 'SET #response = :response',
-        ExpressionAttributeNames: { '#response': 'response' },
-        ExpressionAttributeValues: { ':response': { status: result.status, body: result.body } },
-      }),
-    );
+    try {
+      await this.doc.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key,
+          UpdateExpression: 'SET #response = :response',
+          ConditionExpression: '#owner = :me',
+          ExpressionAttributeNames: { '#response': 'response', '#owner': 'owner' },
+          ExpressionAttributeValues: { ':response': { status: result.status, body: result.body }, ':me': owner },
+        }),
+      );
+    } catch (err) {
+      // The lease expired and another request took the key over: its outcome stands, ours is returned unstored.
+      if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      logStale(actorId, key, 'response');
+    }
     return { ...result, replayed: false };
   }
 
@@ -120,7 +144,7 @@ export class IdempotencyRepo {
    * The key is already claimed. Returns `{ replay }` for a stored response, `{}` when this request took
    * over an expired lease (same hash, no response) and must run `fn`; otherwise throws 422 / 409.
    */
-  private async existing<T>(Key: { PK: string; SK: string }, requestHash: string): Promise<{ replay?: IdempotentResult<T> }> {
+  private async existing<T>(Key: { PK: string; SK: string }, requestHash: string, owner: string): Promise<{ replay?: IdempotentResult<T> }> {
     const res = await this.doc.send(new GetCommand({ TableName: this.tableName, Key, ConsistentRead: true }));
     const item = res.Item;
     // Item gone between the failed claim and this read (released after a failure, or TTL): the client retries.
@@ -137,10 +161,10 @@ export class IdempotencyRepo {
         new UpdateCommand({
           TableName: this.tableName,
           Key,
-          UpdateExpression: 'SET leaseUntil = :next',
+          UpdateExpression: 'SET leaseUntil = :next, #owner = :owner',
           ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(#response) AND leaseUntil < :now AND requestHash = :hash',
-          ExpressionAttributeNames: { '#response': 'response' },
-          ExpressionAttributeValues: { ':next': nowSec + IDEMPOTENCY_LEASE_SECONDS, ':now': nowSec, ':hash': requestHash },
+          ExpressionAttributeNames: { '#response': 'response', '#owner': 'owner' },
+          ExpressionAttributeValues: { ':owner': owner, ':next': nowSec + IDEMPOTENCY_LEASE_SECONDS, ':now': nowSec, ':hash': requestHash },
         }),
       );
     } catch (err) {
@@ -152,3 +176,7 @@ export class IdempotencyRepo {
 }
 
 const inProgress = () => new DomainError('REQUEST_IN_PROGRESS', 409, 'A request with this Idempotency-Key is still in progress');
+
+function logStale(actorId: string, key: string, op: 'delete' | 'response'): void {
+  console.error(JSON.stringify({ level: 'error', msg: 'idempotency_stale_owner', actorId, key, op }));
+}
