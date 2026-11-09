@@ -1,12 +1,14 @@
 .PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint
 
-# Floci (local AWS) endpoint and dummy credentials for CDK and osls.
+# Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
+# this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
 FLOCI_ENV = AWS_ENDPOINT_URL=http://localhost:4567 AWS_ENDPOINT_URL_S3=http://localhost:4567 \
 	AWS_S3_FORCE_PATH_STYLE=true AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
 	AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
 
-# Same layering as the npm scripts: .env.example, then .env, then .env.local (later wins).
-LOAD_ENV = set -a && . ./.env.example && { [ ! -f .env ] || . ./.env; } && { [ ! -f .env.local ] || . ./.env.local; } && set +a
+# The single env policy (scripts/load-env.ts), shared with the npm scripts and the Vitest e2e setup:
+# exported env > .env.local > .env.example. Exported values are never overwritten.
+LOAD_ENV = eval "$$(node scripts/load-env.ts --print)"
 
 LOCAL_PORT ?= 3000
 
@@ -24,7 +26,7 @@ deploy-stateful:
 	$(FLOCI_ENV) npx cdk deploy RidecoreStateful --require-approval never --outputs-file cdk-outputs.json
 
 # One-way link: the table name comes from the CDK output; osls never feeds anything back to CDK.
-# The JWT secret is the non-secret dev value from .env.example (no default in serverless.yml).
+# The JWT secret comes from the env policy (dev value in .env.example; no default in serverless.yml).
 # Writes .env.local with RIDECORE_TABLE and RIDECORE_API_URL (Floci's HTTP API path for the stack).
 deploy-api: build
 	@set -e; $(LOAD_ENV); \
@@ -42,7 +44,7 @@ build:
 	npm run build
 
 # Packages the Lambda without any AWS access (dummy credentials, no login).
-# serverless.yml has no JWT secret default, so the dev value is loaded from .env.example here.
+# serverless.yml has no JWT secret default, so it comes from the env policy here.
 package: build
 	$(LOAD_ENV) && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
 
@@ -58,13 +60,20 @@ e2e:
 	@test -f .env.local || { echo "Run 'make up' first (.env.local is missing)" >&2; exit 1; }
 	$(LOAD_ENV) && npx vitest run --project e2e $(E2E_ARGS)
 
-# e2e against the local adapter: starts it in the background, runs the test, stops it.
+# e2e against the local adapter: starts it in the background, runs the test, stops it. Fails if the
+# port is already taken or the server exits during startup, so it never tests someone else's server.
 e2e-local:
 	@set -e; $(LOAD_ENV); \
-	PORT=$(LOCAL_PORT) node src/local/server.ts & pid=$$!; \
+	url=http://localhost:$(LOCAL_PORT); \
+	if curl -s -o /dev/null "$$url/"; then echo "Port $(LOCAL_PORT) is already in use; stop that server first" >&2; exit 1; fi; \
+	PORT=$(LOCAL_PORT) node --import ./scripts/load-env.ts src/local/server.ts & pid=$$!; \
 	trap 'kill $$pid 2>/dev/null || true' EXIT; \
-	for i in $$(seq 50); do curl -s -o /dev/null "http://localhost:$(LOCAL_PORT)/" && break; sleep 0.2; done; \
-	RIDECORE_API_URL=http://localhost:$(LOCAL_PORT) npx vitest run --project e2e $(E2E_ARGS)
+	ready=; for i in $$(seq 50); do \
+	  kill -0 $$pid 2>/dev/null || { echo "Local server exited during startup" >&2; exit 1; }; \
+	  if curl -s -o /dev/null "$$url/"; then ready=1; break; fi; sleep 0.2; \
+	done; \
+	test -n "$$ready" || { echo "Local server did not answer on $$url" >&2; exit 1; }; \
+	RIDECORE_API_URL=$$url npx vitest run --project e2e $(E2E_ARGS)
 
 down:
 	docker compose down

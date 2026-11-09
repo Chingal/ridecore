@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { depsFromEnv, jwtSecretFromEnv, MIN_JWT_SECRET_LENGTH } from '../../../src/http/deps.ts';
 
 const SECRET = 'x'.repeat(MIN_JWT_SECRET_LENGTH);
@@ -22,5 +22,25 @@ describe('JWT secret from env (fail closed)', () => {
     expect(() => depsFromEnv({ RIDECORE_TABLE: 't', RIDECORE_JWT_SECRET: 'short' })).toThrow('at least');
     expect(() => depsFromEnv({ RIDECORE_JWT_SECRET: SECRET })).toThrow('RIDECORE_TABLE is not set');
     expect(depsFromEnv({ RIDECORE_TABLE: 't', RIDECORE_JWT_SECRET: SECRET }).jwtSecret).toBe(SECRET);
+  });
+});
+
+describe('Lambda entry (src/http/lambda.ts)', () => {
+  it('fails at module init (cold start) when the JWT secret is missing or short', async () => {
+    for (const secret of [undefined, 'short']) {
+      vi.resetModules();
+      vi.stubEnv('RIDECORE_TABLE', 't');
+      vi.stubEnv('RIDECORE_JWT_SECRET', secret);
+      await expect(import('../../../src/http/lambda.ts')).rejects.toThrow('RIDECORE_JWT_SECRET');
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('initializes with a valid configuration', async () => {
+    vi.resetModules();
+    vi.stubEnv('RIDECORE_TABLE', 't');
+    vi.stubEnv('RIDECORE_JWT_SECRET', SECRET);
+    await expect(import('../../../src/http/lambda.ts')).resolves.toHaveProperty('handler');
+    vi.unstubAllEnvs();
   });
 });

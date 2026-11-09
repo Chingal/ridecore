@@ -5,18 +5,22 @@ import type { Actor, LatLng, Trip } from '../../src/domain/trip.ts';
 import { signToken } from '../../src/http/auth.ts';
 import { createDeps } from '../../src/http/deps.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
-import { useFlociEnv } from '../integration/helpers/table.ts';
 
 /**
  * Full trip over real HTTP. The target is `RIDECORE_API_URL`: the Floci-deployed Lambda behind the
- * HTTP API (`make up` writes it to `.env.local`) or the local adapter (`npm run dev`, port 3000).
+ * HTTP API (`make up` writes it to `.env.local`) or the local adapter (`make e2e-local`, port 3000).
  * Both share the Floci table named by `RIDECORE_TABLE`, and tokens are signed with the same dev secret.
+ * Configuration comes from `scripts/load-env.ts` (Vitest e2e `setupFiles`): exported env, then
+ * `.env.local`, then `.env.example`.
  */
-useFlociEnv();
-const API = (process.env.RIDECORE_API_URL ?? 'http://localhost:3000').replace(/\/$/, '');
-const TABLE = process.env.RIDECORE_TABLE ?? 'ridecore';
-const SECRET = process.env.RIDECORE_JWT_SECRET ?? '';
-if (SECRET === '') throw new Error('RIDECORE_JWT_SECRET is not set: run through `make e2e` / `make e2e-local` (they load .env.example)');
+function required(name: string, hint: string): string {
+  const value = process.env[name];
+  if (value === undefined || value === '') throw new Error(`${name} is not set: ${hint}`);
+  return value;
+}
+const API = required('RIDECORE_API_URL', "run 'make up' (writes .env.local) or export it").replace(/\/$/, '');
+const TABLE = required('RIDECORE_TABLE', 'expected from .env.local or .env.example');
+const SECRET = required('RIDECORE_JWT_SECRET', 'expected from .env.example');
 
 const doc = createDocumentClient(createDynamoClient());
 // Offering a trip to drivers is an asynchronous consumer of `trip.requested` (Plan 2); no HTTP route
@@ -51,18 +55,46 @@ const tripOf = (res: Res) => res.body as unknown as Trip;
 const ORIGIN: LatLng = { lat: 2.4419 + (Math.random() - 0.5) * 0.004, lng: -76.6063 + (Math.random() - 0.5) * 0.004 };
 const DESTINATION: LatLng = { lat: ORIGIN.lat + 0.03, lng: ORIGIN.lng + 0.01 };
 
-const drivers: Person[] = [];
+/** What this run created in the shared table, so cleanup can undo it even after a failed assertion. */
+const leftovers: { passenger?: Person; driver?: Person; tripId?: string } = {};
+
+const ACTIVE = new Set(['REQUESTED', 'ACCEPTED', 'DRIVER_ARRIVED', 'IN_PROGRESS']);
 
 afterAll(async () => {
-  // Leave the shared table tidy: the test driver goes offline so later runs never offer to it.
-  for (const d of drivers) await deps.drivers.setAvailability(d.id, 'OFFLINE').catch(() => undefined);
+  // Leave the shared table tidy: no active trip left behind and the test driver OFFLINE, so later
+  // runs never offer to it. Any cleanup failure fails the run instead of being swallowed.
+  const failures: unknown[] = [];
+  const { passenger, driver, tripId } = leftovers;
+  if (tripId !== undefined) {
+    try {
+      const trip = await deps.trips.get(tripId);
+      if (trip !== null && ACTIVE.has(trip.state)) {
+        const now = new Date();
+        if (trip.state === 'IN_PROGRESS' && driver !== undefined) {
+          await deps.dispatch.finishTrip(tripId, { type: 'COMPLETE' }, driver, now);
+        } else if (passenger !== undefined) {
+          await deps.dispatch.finishTrip(tripId, { type: 'CANCEL', reason: 'e2e cleanup' }, passenger, now);
+        }
+      }
+    } catch (err) {
+      failures.push(err);
+    }
+  }
+  if (driver !== undefined) {
+    try {
+      await deps.drivers.setAvailability(driver.id, 'OFFLINE');
+    } catch (err) {
+      failures.push(err);
+    }
+  }
+  if (failures.length > 0) throw new AggregateError(failures, `e2e cleanup failed (${failures.length})`);
 });
 
 describe(`trip flow over HTTP (${API})`, () => {
   it('request -> accept -> arrive -> start -> complete -> rate, with outbox EVENT#000001..000006', async () => {
     const passenger = await person('passenger');
     const drv = await person('driver');
-    drivers.push(drv);
+    leftovers.passenger = passenger;
     // Driver registration is a seed concern, not an API route.
     await deps.drivers.upsert({
       id: drv.id,
@@ -70,6 +102,7 @@ describe(`trip flow over HTTP (${API})`, () => {
       vehicle: { plate: 'TST000', model: 'Demo sedan', category: 'STANDARD' },
       availability: 'OFFLINE',
     });
+    leftovers.driver = drv;
 
     expect((await call('PUT', '/drivers/me/position', drv, ORIGIN)).status).toBe(200);
     const online = await call('PUT', '/drivers/me/availability', drv, { status: 'AVAILABLE' });
@@ -79,6 +112,7 @@ describe(`trip flow over HTTP (${API})`, () => {
     const created = await call('POST', '/trips', passenger, { origin: ORIGIN, destination: DESTINATION }, { 'idempotency-key': randomUUID() });
     expect(created.status).toBe(201);
     const trip = tripOf(created);
+    leftovers.tripId = trip.id;
     expect(trip).toMatchObject({ passengerId: passenger.id, state: 'REQUESTED', version: 1 });
 
     expect(await deps.dispatch.offerTrip(trip.id)).toContain(drv.id);

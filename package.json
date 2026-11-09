@@ -12,11 +12,11 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "test:e2e": "vitest run --project e2e",
-    "token": "node --env-file=.env.example --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/dev-token.ts",
+    "token": "node --import ./scripts/load-env.ts scripts/dev-token.ts",
     "build": "node scripts/build.ts",
-    "dev": "node --env-file=.env.example --env-file-if-exists=.env --env-file-if-exists=.env.local src/local/server.ts",
-    "seed": "node --env-file=.env.example --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/seed.ts",
-    "package": "npm run build && serverless package"
+    "dev": "node --import ./scripts/load-env.ts src/local/server.ts",
+    "seed": "node --import ./scripts/load-env.ts scripts/seed.ts",
+    "package": "npm run build && eval \"$(node scripts/load-env.ts --print)\" && serverless package"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

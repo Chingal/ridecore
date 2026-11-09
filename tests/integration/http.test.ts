@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Actor, LatLng, Trip } from '../../src/domain/trip.ts';
 import { signToken } from '../../src/http/auth.ts';
 import { createDeps, type Deps, type LogLine } from '../../src/http/deps.ts';
-import { createHandler, handler as envHandler } from '../../src/http/handler.ts';
+import { createHandler } from '../../src/http/handler.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
 import { TripRepo } from '../../src/infra/dynamo/trip-repo.ts';
 import { createTestTable, deleteTestTable, useFlociEnv } from './helpers/table.ts';
@@ -563,10 +563,11 @@ describe('errors and logging', () => {
   });
 });
 
-describe('exported handler', () => {
-  it('builds its dependencies from env on first call', async () => {
+describe('Lambda entry (src/http/lambda.ts)', () => {
+  it('builds its dependencies from env at module init and serves requests', async () => {
     process.env.RIDECORE_TABLE = table;
     process.env.RIDECORE_JWT_SECRET = SECRET;
+    const { handler: envHandler } = await import('../../src/http/lambda.ts');
     const passenger = await person('passenger');
     const out = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {

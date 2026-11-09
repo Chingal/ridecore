@@ -37,11 +37,11 @@ package:
   individually: false
   patterns:
     - '!**'
-    - dist/handler.mjs
+    - dist/lambda.mjs
 
 functions:
   api:
-    # esbuild bundle of src/http/handler.ts (`npm run build`).
-    handler: dist/handler.handler
+    # esbuild bundle of src/http/lambda.ts (`npm run build`).
+    handler: dist/lambda.handler
     events:
       - httpApi: '*'

@@ -6,7 +6,7 @@ import { DomainError } from '../domain/errors.ts';
 import type { Actor } from '../domain/trip.ts';
 import { hashRequest } from '../infra/dynamo/idempotency-repo.ts';
 import { verifyToken } from './auth.ts';
-import { type Deps, depsFromEnv, jsonLog, type LogLine, services } from './deps.ts';
+import { type Deps, jsonLog, type LogLine, services } from './deps.ts';
 import { errorJson, json, toErrorInfo } from './respond.ts';
 import { matchRoute, type RouteName } from './routes.ts';
 import {
@@ -151,6 +151,3 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
     return response;
   };
 }
-
-/** Lambda entry point (API Gateway HTTP API v2). Dependencies are built from env on the first request. */
-export const handler: ApiHandler = createHandler(() => depsFromEnv());
