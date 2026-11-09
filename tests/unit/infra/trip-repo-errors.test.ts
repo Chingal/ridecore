@@ -1,6 +1,7 @@
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { describe, expect, it } from 'vitest';
+import { DomainError } from '../../../src/domain/errors.ts';
 import { toEvent } from '../../../src/domain/events.ts';
 import { type Trip, transition } from '../../../src/domain/trip.ts';
 import { TripRepo } from '../../../src/infra/dynamo/trip-repo.ts';
@@ -63,5 +64,44 @@ describe('TripRepo cancellation-reason mapping', () => {
     const boom = new Error('network');
     const doc = { send: () => Promise.reject(boom) } as unknown as DynamoDBDocumentClient;
     await expect(new TripRepo(doc, 'stub').get('x')).rejects.toBe(boom);
+  });
+  // save(ACCEPTED) + two tagged extras: [trip, outbox, driver reservation, extra0, extra1]
+  describe('extra items carrying their own error', () => {
+    const notOffered = new DomainError('NOT_OFFERED', 404, 'not offered');
+    const notAvailable = new DomainError('DRIVER_NOT_AVAILABLE', 409, 'not available');
+    const extras = [
+      { item: { ConditionCheck: { TableName: 'stub', Key: { PK: 'a', SK: 'b' }, ConditionExpression: 'attribute_exists(PK)' } }, onConditionFailed: notOffered },
+      { item: { ConditionCheck: { TableName: 'stub', Key: { PK: 'c', SK: 'd' }, ConditionExpression: 'attribute_exists(PK)' } }, onConditionFailed: notAvailable },
+    ];
+    const save = (codes: string[]) => repoRejectingWith(codes).save(trip, accepted, toEvent(trip, accepted), extras);
+
+    it('a failed tagged extra raises its own error, including its status', async () => {
+      await expect(save(['None', 'None', 'None', 'ConditionalCheckFailed', 'None'])).rejects.toBe(notOffered);
+      await expect(save(['None', 'None', 'None', 'None', 'ConditionalCheckFailed'])).rejects.toBe(notAvailable);
+    });
+
+    it('when several tagged extras fail, the earliest one wins', async () => {
+      await expect(save(['None', 'None', 'None', 'ConditionalCheckFailed', 'ConditionalCheckFailed'])).rejects.toBe(
+        notOffered,
+      );
+    });
+
+    it('trip-level conflicts win over tagged extras', async () => {
+      await expect(save(['ConditionalCheckFailed', 'None', 'None', 'None', 'ConditionalCheckFailed'])).rejects.toMatchObject({
+        code: 'CONCURRENT_UPDATE',
+        status: 409,
+      });
+      await expect(save(['None', 'None', 'ConditionalCheckFailed', 'None', 'ConditionalCheckFailed'])).rejects.toMatchObject({
+        code: 'DRIVER_BUSY',
+      });
+    });
+
+    it('an untagged extra still maps to CONCURRENT_UPDATE', async () => {
+      const repo = repoRejectingWith(['None', 'None', 'None', 'ConditionalCheckFailed']);
+      await expect(repo.save(trip, accepted, toEvent(trip, accepted), [extras[0]!.item])).rejects.toMatchObject({
+        code: 'CONCURRENT_UPDATE',
+        status: 409,
+      });
+    });
   });
 });

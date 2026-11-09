@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/ngeohash": "^0.6.8",
     "@types/node": "^24.19.2",
     "aws-cdk": "^2.1148.0",
     "aws-cdk-lib": "^2.275.0",
@@ -26,6 +27,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1165.0",
-    "@aws-sdk/lib-dynamodb": "^3.1165.0"
+    "@aws-sdk/lib-dynamodb": "^3.1165.0",
+    "ngeohash": "^0.6.3"
   }
 }

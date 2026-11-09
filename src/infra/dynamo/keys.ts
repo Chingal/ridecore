@@ -46,3 +46,27 @@ export const outboxKey = (tripId: string, version: number) => ({
   PK: `TRIP#${tripId}`,
   SK: `EVENT#${String(version).padStart(6, '0')}`,
 });
+
+export const GSI2 = TABLE_DEFINITION.globalSecondaryIndexes[1];
+
+export const driverKey = (driverId: string) => ({ PK: `DRIVER#${driverId}`, SK: 'META' });
+
+/** Sparse GSI2 keys: present on a driver's META item only while it is AVAILABLE with a position. */
+export const driverGsi2 = (geohash5: string, driverId: string) => ({
+  GSI2PK: availabilityCellPk(geohash5),
+  GSI2SK: `DRIVER#${driverId}`,
+});
+
+export const availabilityCellPk = (geohash5: string) => `AVAIL#${geohash5}`;
+
+export const OFFER_PREFIX = 'OFFER#';
+
+export const offerKey = (tripId: string, driverId: string) => ({ PK: `TRIP#${tripId}`, SK: `${OFFER_PREFIX}${driverId}` });
+
+/** GSI1 keys of an offer, for a driver's "my offers" query. */
+export const offerGsi1 = (driverId: string, createdAt: string) => ({
+  GSI1PK: driverGsi1Pk(driverId),
+  GSI1SK: `${OFFER_PREFIX}${createdAt}`,
+});
+
+export const driverGsi1Pk = (driverId: string) => `DRIVER#${driverId}`;
