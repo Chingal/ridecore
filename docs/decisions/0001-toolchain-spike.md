@@ -24,7 +24,7 @@ Additional findings:
 
 - Endpoint override works through environment variables only, for both osls and CDK, with no plugin or `cdklocal`: `AWS_ENDPOINT_URL=http://localhost:4567 AWS_ENDPOINT_URL_S3=http://localhost:4567 AWS_S3_FORCE_PATH_STYLE=true`.
 - CDK needs `cdk bootstrap aws://000000000000/us-east-1` once per fresh Floci (memory storage, so after every restart) before `cdk deploy`.
-- HTTP API invocation on Floci: `curl http://localhost:4567/_aws/execute-api/<apiId>/$default/ping` returned `{"v":"v24.22.2"}` (200). The `execute-api.amazonaws.com` URL printed by osls is not reachable locally.
+- HTTP API invocation on Floci: `curl "http://localhost:4567/_aws/execute-api/<apiId>/\$default/ping"` returned `{"v":"v24.22.2"}` (200). The `execute-api.amazonaws.com` URL printed by osls is not reachable locally.
 - `ts-node` crashes with TypeScript 7.0.2 (`Cannot read properties of undefined (reading 'fileExists')`). CDK app ran with Node's native type stripping: `"app": "node bin/app.ts"` with `"type": "module"` in `package.json`. Use `import` statements with erasable-only TypeScript syntax (no enums, no parameter properties).
 - `Could not reconcile orphaned EC2 containers: java.net.SocketException` appeared only in the first start, before `/var/run/docker.sock` was mounted. With the socket mounted (final compose file) it does not appear (checked with `docker logs | grep orphan`: no match), so it does not affect the chosen path.
 - Do not install `serverless` and `osls` in the same package: both provide a `serverless` bin and `npx serverless` then runs osls.
@@ -110,7 +110,7 @@ osls (dir with `osls@4.6.0`; the first line shows the bin collision when both ar
 ```
 $ npx serverless --version
 osls version: 4.6.0
-$ npx serverless package   (with frameworkVersion: "4" not needed)
+$ npx serverless package   # osls installed alongside, so this ran osls
 
 Packaging spike-sls for stage dev (us-east-1)
 
@@ -130,7 +130,7 @@ functions:
   ping: spike-sls-dev-ping (32 MB)
 $ aws lambda invoke --function-name spike-sls-dev-ping o.json; cat o.json
 {"statusCode":200,"body":"{\"v\":\"v24.22.2\"}"}
-$ curl http://localhost:4567/_aws/execute-api/6444c3ecb8/$default/ping
+$ curl 'http://localhost:4567/_aws/execute-api/6444c3ecb8/$default/ping'
 {"v":"v24.22.2"} [200]
 ```
 </details>
@@ -195,7 +195,7 @@ SpikeStack: deploying... [1/1]
 ✅  SpikeStack
 ✨  Deployment time: 0.04s
 arn:aws:cloudformation:us-east-1:000000000000:stack/SpikeStack/678fd776-f8ed-4f9e-b0cf-8f2cba9439e9
-$ aws dynamodb describe-table --table-name spike-cdk --query Table.[TableStatus,StreamSpecification]
+$ aws dynamodb describe-table --table-name spike-cdk --query 'Table.[TableStatus,StreamSpecification]'
 [
     "ACTIVE",
     {
@@ -212,22 +212,26 @@ Stream handler `ddb.mjs`: `export const handler = async (e) => { console.log('ST
 
 ```
 # EventBridge -> SQS
-$ aws sqs create-queue --queue-name spike-q  -> http://localhost:4567/000000000000/spike-q
-$ aws events put-rule --name spike-rule --event-pattern {"source":["ridecore.spike"]}
+$ Q=$(aws sqs create-queue --queue-name spike-q --query QueueUrl --output text); echo $Q
+http://localhost:4567/000000000000/spike-q
+$ aws events put-rule --name spike-rule --event-pattern '{"source":["ridecore.spike"]}' --query RuleArn --output text
 arn:aws:events:us-east-1:000000000000:rule/spike-rule
-$ aws events put-targets --rule spike-rule --targets Id=1,Arn=arn:aws:sqs:us-east-1:000000000000:spike-q  (FailedEntryCount)
+$ aws events put-targets --rule spike-rule --targets 'Id=1,Arn=arn:aws:sqs:us-east-1:000000000000:spike-q' --query FailedEntryCount
 0
-$ aws events put-events --entries [{"Source":"ridecore.spike","DetailType":"T","Detail":"{\"a\":1}"}]  (FailedEntryCount)
+$ aws events put-events --entries '[{"Source":"ridecore.spike","DetailType":"T","Detail":"{\"a\":1}"}]' --query FailedEntryCount
 0
-$ aws sqs receive-message --queue-url http://localhost:4567/000000000000/spike-q --wait-time-seconds 3  (Body)
+$ aws sqs receive-message --queue-url "$Q" --wait-time-seconds 3 --query 'Messages[0].Body' --output text
 {"version":"0","id":"d9b8021a-24a9-4b74-bc22-5b5018335bd6","source":"ridecore.spike","detail-type":"T","account":"000000000000","time":"2026-11-09T22:05:27.993166292Z","region":"us-east-1","resources":[],"detail":{"a":1},"event-bus-name":"default"}
 
 # DynamoDB Streams -> Lambda
+$ python3 -c "import zipfile;zipfile.ZipFile('d.zip','w').write('ddb.mjs')"
+$ aws lambda create-function --function-name ddb-h --runtime nodejs24.x --handler ddb.handler --role arn:aws:iam::000000000000:role/r --zip-file fileb://d.zip --query FunctionArn --output text
 arn:aws:lambda:us-east-1:000000000000:function:ddb-h
-$ aws lambda create-event-source-mapping --function-name ddb-h --event-source-arn <LatestStreamArn> --starting-position TRIM_HORIZON --batch-size 1  (State)
+$ ARN=$(aws dynamodb describe-table --table-name spike-cdk --query Table.LatestStreamArn --output text)
+$ aws lambda create-event-source-mapping --function-name ddb-h --event-source-arn "$ARN" --starting-position TRIM_HORIZON --batch-size 1 --query State --output text
 Enabled
-$ aws dynamodb put-item --table-name spike-cdk --item {"pk":{"S":"k1"},"x":{"S":"v"}}
-$ aws logs filter-log-events --log-group-name /aws/lambda/ddb-h --query events[].message
+$ aws dynamodb put-item --table-name spike-cdk --item '{"pk":{"S":"k1"},"x":{"S":"v"}}'
+$ aws logs filter-log-events --log-group-name /aws/lambda/ddb-h --query 'events[].message' --output text
 2026-11-09T22:05:32.550Z	664fd05b-8e2a-4576-a968-040b11911282	INFO	STREAM_EVENT {"Records":[{"eventID":"36a8dff3-f0ed-497b-b10f-b810069adf5c","eventName":"INSERT","eventVersion":"1.1","eventSource":"aws:dynamodb","awsRegion":"us-east-1","dynamodb":{"ApproximateCreationDateTime":1794261931,"Keys":{"pk":{"S":"k1"}},"NewImage":{"pk":{"S":"k1"},"x":{"S":"v"}},"SequenceNumber":"000000000000000000001","SizeBytes":100,"StreamViewType":"NEW_AND_OLD_IMAGE
 # floci log
 2026-11-09 22:05:03,036 INFO  [io.quarkus] floci 2.4.0 native (powered by Quarkus 3.40.1) started in 0.054s. Listening on: http://0.0.0.0:4566
