@@ -1,7 +1,7 @@
-import { GetCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createDispatch, type Dispatch } from '../../src/app/dispatch.ts';
+import { createDispatch, type Dispatch, MAX_OFFERS_PER_TRIP } from '../../src/app/dispatch.ts';
 import { DomainError } from '../../src/domain/errors.ts';
 import { toEvent } from '../../src/domain/events.ts';
 import { type Actor, type LatLng, type Trip, transition, type TripAction } from '../../src/domain/trip.ts';
@@ -105,6 +105,19 @@ async function expectDomainError(promise: Promise<unknown>, code: string, status
   expect(err).toMatchObject({ code, status });
 }
 
+/** Offer items still in the driver's "my offers" index (GSI1). */
+async function indexedOfferTripIds(driverId: string): Promise<string[]> {
+  const res = await doc.send(
+    new QueryCommand({
+      TableName: table,
+      IndexName: 'GSI1',
+      KeyConditionExpression: 'GSI1PK = :pk AND begins_with(GSI1SK, :offer)',
+      ExpressionAttributeValues: { ':pk': `DRIVER#${driverId}`, ':offer': 'OFFER#' },
+    }),
+  );
+  return (res.Items ?? []).map((i) => String(i.tripId));
+}
+
 const nearIds = async (p: LatLng, limit = 10) => (await drivers.availableNear(p, limit)).map((d) => d.id);
 
 describe('dispatch (DynamoDB on Floci)', () => {
@@ -172,6 +185,8 @@ describe('dispatch (DynamoDB on Floci)', () => {
     await dispatch.offerTrip(trip.id);
     await dispatch.acceptTrip(trip.id, asDriver(d), BASE);
     await expectDomainError(dispatch.offerTrip(trip.id), 'INVALID_TRANSITION', 409);
+    // The offer write itself re-checks the trip state (offerTrip racing with an accept).
+    await expectDomainError(drivers.putOffers(trip.id, [d], BASE.toISOString()), 'INVALID_TRANSITION', 409);
   });
 
   it('accept by a driver who was not offered the trip -> 404 NOT_OFFERED, nothing written', async () => {
@@ -248,8 +263,13 @@ describe('dispatch (DynamoDB on Floci)', () => {
     expect(await trips.activeTripId('DRIVER', loser)).toBeNull();
     expect(await nearIds(BOGOTA)).toEqual([loser]);
 
-    // The accepted trip is no longer listed as an offer, and an on-trip driver cannot go offline.
+    // Accepting retires every offer of the trip from the "my offers" index (items stay as history),
+    // and an on-trip driver cannot go offline.
     expect(await dispatch.listOffers(loser)).toEqual([]);
+    expect(await indexedOfferTripIds(loser)).toEqual([]);
+    expect(await indexedOfferTripIds(winner)).toEqual([]);
+    expect(await rawItem(`TRIP#${trip.id}`, `OFFER#${loser}`)).toMatchObject({ driverId: loser });
+    expect(await rawItem(`TRIP#${trip.id}`, `OFFER#${loser}`)).not.toHaveProperty('GSI1PK');
     await expectDomainError(drivers.setAvailability(winner, 'OFFLINE'), 'DRIVER_ON_TRIP', 409);
   });
 
@@ -290,7 +310,7 @@ describe('dispatch (DynamoDB on Floci)', () => {
     expect(await dispatch.finishTrip(other.id, { type: 'CANCEL' }, passenger, BASE)).toMatchObject({ state: 'CANCELLED' });
     await expectDomainError(dispatch.finishTrip(randomUUID(), { type: 'CANCEL' }, passenger, BASE), 'TRIP_NOT_FOUND', 404);
   });
-  it('listOffers still finds an older pending offer behind 50 newer terminal offers', async () => {
+  it('trips leaving REQUESTED drop out of the offer index, so 50 newer terminal offers cannot hide a pending one', async () => {
     const d = await seedDriver(north(SANTA_MARTA, 0.5));
     const pending = await requestTrip(SANTA_MARTA);
     expect(await dispatch.offerTrip(pending.id, BASE)).toEqual([d]);
@@ -301,6 +321,22 @@ describe('dispatch (DynamoDB on Floci)', () => {
       await dispatch.finishTrip(trip.id, { type: 'CANCEL' }, { id: trip.passengerId, role: 'passenger' }, BASE);
     }
 
+    expect(await indexedOfferTripIds(d)).toEqual([pending.id]);
     expect((await dispatch.listOffers(d)).map((t) => t.id)).toEqual([pending.id]);
+  });
+
+  it('offerTrip caps the number of offers one trip can collect', async () => {
+    const origin = { lat: 7.1193, lng: -73.1227 }; // Bucaramanga
+    for (let i = 0; i < MAX_OFFERS_PER_TRIP + 3; i++) await seedDriver(north(origin, 0.1 + i * 0.05));
+    const trip = await requestTrip(origin);
+    const offered = new Set<string>();
+    for (let round = 0; round < 6; round++) {
+      // Drivers leaving after each round make the next round pick new ones.
+      const ids = await dispatch.offerTrip(trip.id, BASE);
+      ids.forEach((id) => offered.add(id));
+      for (const id of ids) await drivers.setAvailability(id, 'OFFLINE');
+    }
+    expect(offered.size).toBe(MAX_OFFERS_PER_TRIP);
+    expect(await dispatch.offerTrip(trip.id, BASE)).toEqual([]);
   });
 });

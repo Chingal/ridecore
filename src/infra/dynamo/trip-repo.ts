@@ -1,5 +1,6 @@
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   type DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
@@ -45,6 +46,11 @@ const CONFLICTS = {
 
 /** Tagged extras rank after every trip-level conflict, in the order the caller passed them. */
 const TAGGED_EXTRA_PRIORITY = 10;
+
+const BATCH_GET_MAX_KEYS = 100;
+const BATCH_GET_MAX_ATTEMPTS = 5;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 type TaggedItem = { item: TransactWriteItem; priority: number; error: () => DomainError };
 
@@ -102,6 +108,33 @@ export class TripRepo {
   async get(id: string): Promise<Trip | null> {
     const res = await this.doc.send(new GetCommand({ TableName: this.tableName, Key: tripKey(id), ConsistentRead: true }));
     return res.Item ? toTrip(res.Item) : null;
+  }
+
+  /**
+   * Trips by id via BatchGetItem (chunks of 100, consistent reads), in the order of `ids`; unknown
+   * ids are skipped. Unprocessed keys are retried a bounded number of times, then it throws.
+   */
+  async getMany(ids: readonly string[]): Promise<Trip[]> {
+    const found = new Map<string, Trip>();
+    for (let i = 0; i < ids.length; i += BATCH_GET_MAX_KEYS) {
+      let keys: Record<string, unknown>[] = ids.slice(i, i + BATCH_GET_MAX_KEYS).map((id) => tripKey(id));
+      for (let attempt = 0; keys.length > 0; attempt++) {
+        if (attempt === BATCH_GET_MAX_ATTEMPTS) throw new Error(`getMany: ${keys.length} keys still unprocessed`);
+        if (attempt > 0) await sleep(2 ** attempt * 25); // back off before retrying throttled keys
+        const res = await this.doc.send(
+          new BatchGetCommand({ RequestItems: { [this.tableName]: { Keys: keys, ConsistentRead: true } } }),
+        );
+        for (const item of res.Responses?.[this.tableName] ?? []) {
+          const trip = toTrip(item);
+          found.set(trip.id, trip);
+        }
+        keys = res.UnprocessedKeys?.[this.tableName]?.Keys ?? [];
+      }
+    }
+    return ids.flatMap((id) => {
+      const trip = found.get(id);
+      return trip === undefined ? [] : [trip];
+    });
   }
 
   /** The passenger's trips, newest first. */

@@ -1,4 +1,4 @@
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
   type DynamoDBDocumentClient,
   GetCommand,
@@ -23,6 +23,7 @@ import {
   OFFER_PREFIX,
   offerGsi1,
   offerKey,
+  tripKey,
 } from './keys.ts';
 import type { ExtraItem } from './trip-repo.ts';
 
@@ -41,6 +42,14 @@ export interface Driver {
 export type DriverProfile = Omit<Driver, 'availability' | 'geohash5'> & { availability: 'OFFLINE' | 'AVAILABLE' };
 
 export const GEOHASH_PRECISION = 5;
+
+/**
+ * Hard cap on one paginated query. Reaching it means the data outgrew the design (offers are
+ * bounded per trip and retired from the index when the trip leaves REQUESTED), so it throws
+ * instead of returning a silently truncated result.
+ */
+export const MAX_QUERY_PAGES = 10;
+export const MAX_QUERY_ITEMS = 500;
 
 /** How many times a read-then-conditional-write is retried when the driver changed in between. */
 const MAX_ATTEMPTS = 3;
@@ -132,38 +141,63 @@ export class DriverRepo {
       .map(({ driver }) => driver);
   }
 
-  /** Writes one offer item per driver (idempotent: re-offering overwrites). */
+  /**
+   * Writes one offer item per driver (re-offering overwrites), in one transaction with a check that
+   * the trip is still REQUESTED, so an offer racing with an accept/cancel is refused (409 INVALID_TRANSITION).
+   */
   async putOffers(tripId: string, driverIds: readonly string[], createdAt: string): Promise<void> {
     if (driverIds.length === 0) return;
-    await this.doc.send(
-      new TransactWriteCommand({
-        TransactItems: driverIds.map((driverId) => ({
-          Put: {
-            TableName: this.tableName,
-            Item: {
-              ...offerKey(tripId, driverId),
-              ...offerGsi1(driverId, createdAt),
-              tripId,
-              driverId,
-              createdAt,
-              entity: 'OFFER',
+    try {
+      await this.doc.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: tripKey(tripId),
+                ConditionExpression: '#state = :requested',
+                ExpressionAttributeNames: { '#state': 'state' },
+                ExpressionAttributeValues: { ':requested': 'REQUESTED' },
+              },
             },
-          },
-        })),
-      }),
-    );
+            ...driverIds.map((driverId) => ({
+              Put: {
+                TableName: this.tableName,
+                Item: {
+                  ...offerKey(tripId, driverId),
+                  ...offerGsi1(driverId, createdAt),
+                  tripId,
+                  driverId,
+                  createdAt,
+                  entity: 'OFFER',
+                },
+              },
+            })),
+          ],
+        }),
+      );
+    } catch (err) {
+      if (err instanceof TransactionCanceledException && err.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed') {
+        throw new DomainError('INVALID_TRANSITION', 409, 'The trip is no longer REQUESTED');
+      }
+      throw err;
+    }
   }
 
-  async hasOffer(tripId: string, driverId: string): Promise<boolean> {
-    const res = await this.doc.send(
-      new GetCommand({ TableName: this.tableName, Key: offerKey(tripId, driverId), ConsistentRead: true }),
-    );
-    return res.Item !== undefined;
+  /** Ids of the drivers holding an offer for the trip (indexed or retired), from the base table. */
+  async tripOfferDriverIds(tripId: string): Promise<string[]> {
+    const items = await this.queryAll({
+      TableName: this.tableName,
+      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :offer)',
+      ExpressionAttributeValues: { ':pk': tripKey(tripId).PK, ':offer': OFFER_PREFIX },
+      ConsistentRead: true,
+    });
+    return items.flatMap((item) => (typeof item.driverId === 'string' ? [item.driverId] : []));
   }
 
   /**
-   * Trip ids offered to the driver, newest offer first. Offers are never deleted, so this reads
-   * every page: a page limit would let newer offers for finished trips hide an older pending one.
+   * Trip ids with a pending offer for the driver, newest first. Only offers of REQUESTED trips are
+   * in this index (see `retireOfferItems`), so the set is bounded; all pages are read up to the cap.
    */
   async offeredTripIds(driverId: string): Promise<string[]> {
     const items = await this.queryAll({
@@ -177,18 +211,25 @@ export class DriverRepo {
     return items.flatMap((item) => (typeof item.tripId === 'string' ? [item.tripId] : []));
   }
 
-  /** Accept-transaction items: the offer must exist (404 NOT_OFFERED). */
-  offerCheckItem(tripId: string, driverId: string): ExtraItem {
-    return {
-      item: {
-        ConditionCheck: {
-          TableName: this.tableName,
-          Key: offerKey(tripId, driverId),
-          ConditionExpression: 'attribute_exists(PK)',
-        },
+  /**
+   * Transaction items that take every offer of a trip leaving REQUESTED out of the drivers' offer
+   * index (the items stay as history). For the accepting driver, the same Update also requires its
+   * offer to exist (404 NOT_OFFERED): a transaction cannot touch the offer item twice.
+   */
+  retireOfferItems(tripId: string, driverIds: readonly string[], acceptingDriverId?: string): ExtraItem[] {
+    const others = driverIds.filter((id) => id !== acceptingDriverId);
+    const retire = (driverId: string) => ({
+      Update: {
+        TableName: this.tableName,
+        Key: offerKey(tripId, driverId),
+        UpdateExpression: 'REMOVE GSI1PK, GSI1SK',
+        ConditionExpression: 'attribute_exists(PK)',
       },
-      onConditionFailed: notOffered(),
-    };
+    });
+    return [
+      ...(acceptingDriverId === undefined ? [] : [{ item: retire(acceptingDriverId), onConditionFailed: notOffered() }]),
+      ...others.map(retire),
+    ];
   }
 
   /**
@@ -257,18 +298,26 @@ export class DriverRepo {
     return items.map(toDriver);
   }
 
-  /** Runs a query to the end, following `LastEvaluatedKey` across pages. */
+  /**
+   * Runs a query to the end, following `LastEvaluatedKey`, up to MAX_QUERY_PAGES pages and
+   * MAX_QUERY_ITEMS items; beyond that it throws rather than return a truncated result.
+   */
   private async queryAll(input: QueryCommandInput): Promise<Record<string, unknown>[]> {
     const items: Record<string, unknown>[] = [];
     let startKey: Record<string, unknown> | undefined;
-    do {
+    for (let page = 0; page < MAX_QUERY_PAGES; page++) {
       const res = await this.doc.send(
         new QueryCommand({ ...input, ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }) }),
       );
       items.push(...(res.Items ?? []));
+      if (items.length > MAX_QUERY_ITEMS) break;
       startKey = res.LastEvaluatedKey;
-    } while (startKey !== undefined);
-    return items;
+      if (startKey === undefined) return items;
+    }
+    throw new Error(
+      `DriverRepo query cap exceeded (${MAX_QUERY_PAGES} pages / ${MAX_QUERY_ITEMS} items) on ${input.IndexName ?? 'table'} ` +
+        `for ${JSON.stringify(input.ExpressionAttributeValues ?? {})}`,
+    );
   }
 
   /**

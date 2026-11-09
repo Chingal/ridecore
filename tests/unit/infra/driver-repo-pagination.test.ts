@@ -1,7 +1,7 @@
 import type { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { describe, expect, it } from 'vitest';
 import type { LatLng } from '../../../src/domain/trip.ts';
-import { cellOf, type Driver, DriverRepo } from '../../../src/infra/dynamo/driver-repo.ts';
+import { cellOf, type Driver, DriverRepo, MAX_QUERY_ITEMS, MAX_QUERY_PAGES } from '../../../src/infra/dynamo/driver-repo.ts';
 
 const CENTER: LatLng = { lat: 2.4448, lng: -76.6147 };
 
@@ -41,5 +41,23 @@ describe('DriverRepo.availableNear pagination', () => {
     const near = await repo.availableNear(CENTER, 2);
     expect(near.map((d) => d.id)).toEqual(['nearest', 'mid']);
     expect(startKeys).toEqual([undefined, { PK: 'DRIVER#mid', SK: 'META' }]);
+  });
+
+  it('refuses to read past the page cap instead of truncating silently', async () => {
+    let calls = 0;
+    const send = () => {
+      calls++;
+      return Promise.resolve({ Items: [driver(`d${calls}`, 1)], LastEvaluatedKey: { PK: `DRIVER#d${calls}`, SK: 'META' } });
+    };
+    const repo = new DriverRepo({ send } as unknown as DynamoDBDocumentClient, 'stub');
+    await expect(repo.offeredTripIds('d1')).rejects.toThrow(/query cap/);
+    expect(calls).toBe(MAX_QUERY_PAGES);
+  });
+
+  it('refuses a result larger than the item cap', async () => {
+    const big = Array.from({ length: MAX_QUERY_ITEMS + 1 }, (_, i) => ({ tripId: `t${i}` }));
+    const send = () => Promise.resolve({ Items: big });
+    const repo = new DriverRepo({ send } as unknown as DynamoDBDocumentClient, 'stub');
+    await expect(repo.offeredTripIds('d1')).rejects.toThrow(/query cap/);
   });
 });
