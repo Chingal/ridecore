@@ -12,7 +12,11 @@
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "test:e2e": "vitest run --project e2e",
-    "token": "node scripts/dev-token.ts"
+    "token": "node --env-file=.env.example --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/dev-token.ts",
+    "build": "node scripts/build.ts",
+    "dev": "node --env-file=.env.example --env-file-if-exists=.env --env-file-if-exists=.env.local src/local/server.ts",
+    "seed": "node --env-file=.env.example --env-file-if-exists=.env --env-file-if-exists=.env.local scripts/seed.ts",
+    "package": "npm run build && serverless package"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -22,7 +26,9 @@
     "aws-cdk": "^2.1148.0",
     "aws-cdk-lib": "^2.275.0",
     "constructs": "^10.8.1",
+    "esbuild": "^0.28.2",
     "eslint": "^10.14.0",
+    "osls": "^4.6.0",
     "typescript": "~6.0",
     "typescript-eslint": "^8.72.2",
     "vitest": "^5.1.0"

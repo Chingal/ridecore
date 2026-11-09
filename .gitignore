@@ -5,3 +5,5 @@ cdk.out/
 coverage/
 .env
 dist/
+.env.local
+cdk-outputs.json

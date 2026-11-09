@@ -1,0 +1,46 @@
+# Deployed with osls (OSS fork of Serverless Framework v4; see ADR 0001). No `frameworkVersion`:
+# osls reports its own version. Nothing here is resolved over the network at package time, so
+# `serverless package` works with dummy credentials and no login.
+service: ridecore
+
+provider:
+  name: aws
+  runtime: nodejs24.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  # Well below the 30 s idempotency claim lease, so a timed-out request can never outlive its claim.
+  timeout: 10
+  environment:
+    # One-way reference: the Makefile reads the CDK stack output `TableName` and exports it here.
+    RIDECORE_TABLE: ${env:RIDECORE_TABLE, 'ridecore'}
+    # Fixed non-secret dev value (.env.example) for local and CI only.
+    RIDECORE_JWT_SECRET: ${env:RIDECORE_JWT_SECRET, 'dev-only-not-a-secret-change-me'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:BatchGetItem
+            - dynamodb:ConditionCheckItem
+          Resource:
+            - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:provider.environment.RIDECORE_TABLE}
+            - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:provider.environment.RIDECORE_TABLE}/index/*
+
+package:
+  individually: false
+  patterns:
+    - '!**'
+    - dist/handler.mjs
+
+functions:
+  api:
+    # esbuild bundle of src/http/handler.ts (`npm run build`).
+    handler: dist/handler.handler
+    events:
+      - httpApi: '*'
