@@ -309,7 +309,7 @@ describe('authorization', () => {
 });
 
 describe('accept race', () => {
-  it('two offered drivers accept at once: one wins, the loser gets 409 (or 404 once the trip is assigned)', async () => {
+  it('two offered drivers accept at once: one wins, the loser gets 409', async () => {
     const d = deps();
     const api = createHandler(d);
     const passenger = await person('passenger');
@@ -324,7 +324,6 @@ describe('accept race', () => {
     const results = await Promise.all(racers.map((r) => send(api, 'POST', `/trips/${trip.id}/accept`, { token: r.token })));
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
     const loser = results.find((r) => r.status !== 200);
-    expect([409, 404]).toContain(loser?.status);
     expect(loser?.status).toBe(409);
     expect(['CONCURRENT_UPDATE', 'TRIP_ALREADY_TAKEN']).toContain(loser === undefined ? '' : errorOf(loser).code);
   });
@@ -552,7 +551,10 @@ describe('errors and logging', () => {
     });
     const line = JSON.stringify(logs[0]);
     expect(line).not.toContain(passenger.token);
-    expect(line).not.toContain('91');
+    // Structural: no body field and none of the body's content (durationMs may contain any digits).
+    expect(logs[0]).not.toHaveProperty('body');
+    expect(line).not.toContain('"lat"');
+    expect(line).not.toContain('origin');
   });
 
   it('an unsafe correlation id header is replaced by a fresh one', async () => {

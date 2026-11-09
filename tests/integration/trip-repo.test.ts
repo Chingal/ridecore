@@ -198,7 +198,6 @@ describe('TripRepo (DynamoDB on Floci)', () => {
     const after = transition(trip, { type: 'ACCEPT', driverId: d }, driver(d), BASE);
     const extra = { Put: { TableName: table, Item: { PK: `DRIVERSTATUS#${d}`, SK: 'META', status: 'ON_TRIP' } } };
 
-    expect(repo.buildSaveItems(trip, after, toEvent(trip, after))).toHaveLength(3);
     await repo.save(trip, after, toEvent(trip, after), [extra]);
     expect(await rawItem(`DRIVERSTATUS#${d}`, 'META')).toMatchObject({ status: 'ON_TRIP' });
 

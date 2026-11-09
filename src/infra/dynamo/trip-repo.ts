@@ -97,11 +97,6 @@ export class TripRepo {
     ]);
   }
 
-  /** The transaction items `save` sends for a transition, so callers can compose them with their own items. */
-  buildSaveItems(before: Trip, after: Trip, event: TripEvent): TransactWriteItem[] {
-    return this.saveItems(before, after, event).map((t) => t.item);
-  }
-
   /**
    * Persists a transition in ONE transaction: the trip (optimistic lock on `before.version`), the
    * outbox event, reservation changes, plus any `extraItems`. DynamoDB rejects a transaction that

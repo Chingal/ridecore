@@ -60,10 +60,12 @@ describe('TripRepo cancellation-reason mapping', () => {
     });
   });
 
-  it('rethrows non-transaction errors unchanged', async () => {
+  it('rethrows non-transaction errors from a transaction write unchanged', async () => {
     const boom = new Error('network');
     const doc = { send: () => Promise.reject(boom) } as unknown as DynamoDBDocumentClient;
-    await expect(new TripRepo(doc, 'stub').get('x')).rejects.toBe(boom);
+    const repo = new TripRepo(doc, 'stub');
+    await expect(repo.save(trip, accepted, toEvent(trip, accepted))).rejects.toBe(boom);
+    await expect(repo.create(trip, toEvent(null, trip))).rejects.toBe(boom);
   });
   // save(ACCEPTED) + two tagged extras: [trip, outbox, driver reservation, extra0, extra1]
   describe('extra items carrying their own error', () => {
