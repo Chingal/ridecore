@@ -58,6 +58,8 @@ jobs:
       - run: npm run test:integration
       - name: End-to-end trip against the Floci-deployed Lambda
         run: make e2e
+      - name: End-to-end trip against the local adapter
+        run: make e2e-local
       - name: Floci logs
         if: failure()
         run: docker compose logs floci --tail 200
@@ -77,6 +79,8 @@ jobs:
       # src/local/server.ts uses import.meta.main (Node 24.2+).
       - name: Require Node >= 24.2
         run: node -e "const [a,b]=process.versions.node.split('.').map(Number); if (a!==24||b<2) { console.error('Node '+process.version); process.exit(1) }"
+      # Expected: `npm ci` warns that engines wants Node >=26.13.0. This is a compatibility job on
+      # Node 24; the warning is not an error (engine-strict is off) and engines stays unchanged.
       - run: npm ci
       - run: npm run test:unit
       - name: Start Floci
