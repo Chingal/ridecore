@@ -1,0 +1,7 @@
+.superpowers/
+node_modules/
+.serverless/
+cdk.out/
+coverage/
+.env
+dist/
