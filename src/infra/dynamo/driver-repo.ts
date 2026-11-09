@@ -205,6 +205,14 @@ export class DriverRepo {
     }
   }
 
+  /** Whether the driver was ever offered the trip: pending offers and retired ones (kept as history). */
+  async hasOffer(tripId: string, driverId: string): Promise<boolean> {
+    const res = await this.doc.send(
+      new GetCommand({ TableName: this.tableName, Key: offerKey(tripId, driverId), ConsistentRead: true }),
+    );
+    return res.Item !== undefined;
+  }
+
   /**
    * Trip ids with a pending offer for the driver, newest first. Only offers of REQUESTED trips are
    * in this index (offers are retired, under the trip's `offerSeq` guard, when the trip leaves

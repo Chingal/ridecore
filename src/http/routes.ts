@@ -44,17 +44,23 @@ export const ROUTES: readonly Route[] = [
 
 export type RouteMatch = { route: Route; params: Record<string, string> };
 
-const segments = (path: string): string[] => path.split('/').filter((s) => s !== '');
+/**
+ * Path segments of an absolute path, empty ones included: `/trips//x` and `/me/trips/` keep their
+ * empty segments, so they match no route. Paths are exact; a trailing slash is not accepted.
+ */
+const segments = (path: string): string[] | null => (path.startsWith('/') ? path.slice(1).split('/') : null);
 
 /**
  * Matches `method` + raw path (as API Gateway's `rawPath`, still URL-encoded) against ROUTES.
- * Placeholders match exactly one non-empty segment. Returns null for anything else.
+ * Paths match exactly: no empty segments, no trailing slash. Placeholders match exactly one
+ * non-empty segment. Returns null for anything else.
  */
 export function matchRoute(method: string, rawPath: string): RouteMatch | null {
   const actual = segments(rawPath);
+  if (actual === null || actual.includes('')) return null;
   for (const route of ROUTES) {
     if (route.method !== method.toUpperCase()) continue;
-    const expected = segments(route.path);
+    const expected = segments(route.path) ?? [];
     if (expected.length !== actual.length) continue;
     const params: Record<string, string> = {};
     const ok = expected.every((part, i) => {

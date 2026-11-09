@@ -3,10 +3,11 @@ import { DomainError } from '../domain/errors.ts';
 import { toEvent } from '../domain/events.ts';
 import { assertDistinct, estimateFare, validateLatLng } from '../domain/fare.ts';
 import { type Actor, type LatLng, type Trip, transition } from '../domain/trip.ts';
+import type { DriverRepo } from '../infra/dynamo/driver-repo.ts';
 import type { OfferState, TripRepo } from '../infra/dynamo/trip-repo.ts';
 import type { Dispatch } from './dispatch.ts';
 
-export type TripDeps = { trips: TripRepo; dispatch: Dispatch };
+export type TripDeps = { trips: TripRepo; drivers: DriverRepo; dispatch: Dispatch };
 
 export type TripRef = { tripId: string };
 export type RequestTripInput = { origin: LatLng; destination: LatLng };
@@ -35,6 +36,24 @@ const TRIP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const tripNotFound = () => new DomainError('TRIP_NOT_FOUND', 404, 'Trip not found');
 
+/**
+ * Why a driver entitled to try (offered or assigned) cannot accept `trip`: another driver holds it
+ * (409 TRIP_ALREADY_TAKEN), or the state machine rejects ACCEPT (409 INVALID_TRANSITION, e.g. cancelled
+ * or already accepted by this driver). If neither applies the trip changed under us: 409 CONCURRENT_UPDATE.
+ */
+function lostAccept(trip: Trip, actor: Actor, now: Date): DomainError {
+  if (trip.driverId !== undefined && trip.driverId !== actor.id) {
+    return new DomainError('TRIP_ALREADY_TAKEN', 409, 'Another driver already accepted this trip');
+  }
+  try {
+    transition(trip, { type: 'ACCEPT', driverId: actor.id }, actor, now);
+  } catch (err) {
+    if (err instanceof DomainError) return err;
+    throw err;
+  }
+  return new DomainError('CONCURRENT_UPDATE', 409, 'The trip was modified concurrently');
+}
+
 /** Who may see a trip at all. Everyone else gets the same 404 as for a missing trip, so ids cannot be probed. */
 function canSee(trip: Trip, offers: OfferState, actor: Actor): boolean {
   if (actor.role === 'passenger') return trip.passengerId === actor.id;
@@ -43,7 +62,7 @@ function canSee(trip: Trip, offers: OfferState, actor: Actor): boolean {
 }
 
 export function createTripService(deps: TripDeps): TripService {
-  const { trips, dispatch } = deps;
+  const { trips, drivers, dispatch } = deps;
 
   /**
    * Loads the trip only if `actor` may see it. Runs before the state machine because the domain's own
@@ -116,18 +135,22 @@ export function createTripService(deps: TripDeps): TripService {
     },
 
     async acceptTrip(actor, input, now) {
-      // Strangers get 404 here and never reach dispatch, whose NOT_OFFERED would reveal the trip.
-      const trip = await visible(input.tripId, actor);
-      // The assigned driver retrying: the state machine answers 409 INVALID_TRANSITION.
-      if (trip.state !== 'REQUESTED') transition(trip, { type: 'ACCEPT', driverId: actor.id }, actor, now);
+      if (!TRIP_ID.test(input.tripId)) throw tripNotFound();
+      const found = await trips.getWithOffers(input.tripId);
+      if (found === null) throw tripNotFound();
+      const { trip, offers } = found;
+      if (!canSee(trip, offers, actor)) {
+        // Only a driver who held an offer (pending or retired) learns why; anyone else gets the 404 of a missing trip.
+        if (actor.role !== 'driver' || !(await drivers.hasOffer(trip.id, actor.id))) throw tripNotFound();
+        throw lostAccept(trip, actor, now);
+      }
+      if (trip.state !== 'REQUESTED') throw lostAccept(trip, actor, now);
       try {
-        return await dispatch.acceptTrip(input.tripId, actor, now);
+        return await dispatch.acceptTrip(trip.id, actor, now);
       } catch (err) {
-        // The offer was visible a moment ago, so its disappearance means another driver won the race.
-        if (err instanceof DomainError && err.code === 'NOT_OFFERED') {
-          throw new DomainError('CONCURRENT_UPDATE', 409, 'The trip was taken by another driver');
-        }
-        throw err;
+        // The offer was there a moment ago: another driver won, or the passenger cancelled, in between.
+        if (!(err instanceof DomainError && err.code === 'NOT_OFFERED')) throw err;
+        throw lostAccept((await trips.get(trip.id)) ?? trip, actor, now);
       }
     },
 

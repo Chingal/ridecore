@@ -1,6 +1,6 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Actor, LatLng, Trip } from '../../src/domain/trip.ts';
 import { signToken } from '../../src/http/auth.ts';
 import { createDeps, type Deps, type LogLine } from '../../src/http/deps.ts';
@@ -104,6 +104,7 @@ const PASTO: LatLng = { lat: 1.2136, lng: -77.2811 };
 const NEIVA: LatLng = { lat: 2.9273, lng: -75.2819 };
 const BOGOTA: LatLng = { lat: 4.711, lng: -74.0721 };
 const MEDELLIN: LatLng = { lat: 6.2442, lng: -75.5812 };
+const MANIZALES: LatLng = { lat: 5.0703, lng: -75.5138 };
 const north = (p: LatLng, km: number): LatLng => ({ lat: p.lat + km / 111.2, lng: p.lng });
 
 async function requestTrip(api: Api, passenger: Person, origin: LatLng, key = randomUUID()): Promise<Trip> {
@@ -288,10 +289,17 @@ describe('authorization', () => {
   it('unknown route -> 404 ROUTE_NOT_FOUND', async () => {
     const api = createHandler(deps());
     const passenger = await person('passenger');
+    const id = randomUUID();
     for (const [method, path] of [
       ['GET', '/nope'],
       ['DELETE', '/trips'],
-      ['GET', `/trips/${randomUUID()}/extra/segments`],
+      ['GET', `/trips/${id}/extra/segments`],
+      // Empty segments never match, and a trailing slash is not accepted (exact paths only).
+      ['GET', `/trips//${id}`],
+      ['GET', '//me/trips'],
+      ['POST', '/trips//accept'],
+      ['GET', '/me/trips/'],
+      ['GET', 'me/trips'],
     ] as const) {
       const res = await send(api, method, path, { token: passenger.token });
       expect(res.status, path).toBe(404);
@@ -317,7 +325,49 @@ describe('accept race', () => {
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
     const loser = results.find((r) => r.status !== 200);
     expect([409, 404]).toContain(loser?.status);
-    expect(['CONCURRENT_UPDATE', 'TRIP_NOT_FOUND']).toContain(loser === undefined ? '' : errorOf(loser).code);
+    expect(loser?.status).toBe(409);
+    expect(['CONCURRENT_UPDATE', 'TRIP_ALREADY_TAKEN']).toContain(loser === undefined ? '' : errorOf(loser).code);
+  });
+
+  it('an offered driver accepting after another driver committed -> 409 TRIP_ALREADY_TAKEN; a never-offered driver -> 404', async () => {
+    const d = deps();
+    const api = createHandler(d);
+    const passenger = await person('passenger');
+    const [d1, d2] = [await driver(d), await driver(d)];
+    for (const r of [d1, d2]) {
+      await send(api, 'PUT', '/drivers/me/position', { token: r.token, body: MANIZALES });
+      await send(api, 'PUT', '/drivers/me/availability', { token: r.token, body: { status: 'AVAILABLE' } });
+    }
+    const trip = await requestTrip(api, passenger, MANIZALES);
+    expect(await d.dispatch.offerTrip(trip.id, BASE)).toHaveLength(2);
+
+    expect((await send(api, 'POST', `/trips/${trip.id}/accept`, { token: d1.token })).status).toBe(200);
+    const late = await send(api, 'POST', `/trips/${trip.id}/accept`, { token: d2.token });
+    expect(late.status).toBe(409);
+    expect(errorOf(late).code).toBe('TRIP_ALREADY_TAKEN');
+    // The loser still cannot read the trip, and a driver who was never offered learns nothing.
+    expect((await send(api, 'GET', `/trips/${trip.id}`, { token: d2.token })).status).toBe(404);
+    const stranger = await driver(d);
+    const probe = await send(api, 'POST', `/trips/${trip.id}/accept`, { token: stranger.token });
+    expect(probe.status).toBe(404);
+    expect(errorOf(probe).code).toBe('TRIP_NOT_FOUND');
+    expect((await d.trips.get(trip.id))?.driverId).toBe(d1.id);
+  });
+
+  it('an offered driver accepting a trip the passenger cancelled -> 409 INVALID_TRANSITION', async () => {
+    const d = deps();
+    const api = createHandler(d);
+    const passenger = await person('passenger');
+    const drv = await driver(d);
+    const at = north(MANIZALES, 100);
+    await send(api, 'PUT', '/drivers/me/position', { token: drv.token, body: at });
+    await send(api, 'PUT', '/drivers/me/availability', { token: drv.token, body: { status: 'AVAILABLE' } });
+    const trip = await requestTrip(api, passenger, at);
+    await d.dispatch.offerTrip(trip.id, BASE);
+    expect((await send(api, 'POST', `/trips/${trip.id}/cancel`, { token: passenger.token })).status).toBe(200);
+    const res = await send(api, 'POST', `/trips/${trip.id}/accept`, { token: drv.token });
+    expect(res.status).toBe(409);
+    expect(errorOf(res).code).toBe('INVALID_TRANSITION');
   });
 });
 
@@ -518,8 +568,23 @@ describe('exported handler', () => {
     process.env.RIDECORE_TABLE = table;
     process.env.RIDECORE_JWT_SECRET = SECRET;
     const passenger = await person('passenger');
-    const res = await envHandler(event('GET', '/me/trips', { token: passenger.token }));
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(String(res.body))).toEqual({ items: [] });
+    const out = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const res = await envHandler(event('GET', '/me/trips', { token: passenger.token }));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(String(res.body))).toEqual({ items: [] });
+      // The production logger writes one JSON line to stdout.
+      expect(out).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(out.mock.calls[0]?.[0]))).toMatchObject({
+        level: 'info',
+        msg: 'request',
+        method: 'GET',
+        path: '/me/trips',
+        status: 200,
+        correlationId: res.headers?.['x-correlation-id'],
+      });
+    } finally {
+      out.mockRestore();
+    }
   });
 });

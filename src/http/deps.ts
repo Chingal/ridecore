@@ -64,7 +64,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): Deps {
 /** The use cases wired to `deps`. Cheap: plain closures over the repositories. */
 export function services(deps: Deps): { trips: TripService; drivers: DriverService } {
   return {
-    trips: createTripService({ trips: deps.trips, dispatch: deps.dispatch }),
+    trips: createTripService({ trips: deps.trips, drivers: deps.drivers, dispatch: deps.dispatch }),
     drivers: createDriverService({ drivers: deps.drivers, dispatch: deps.dispatch }),
   };
 }
