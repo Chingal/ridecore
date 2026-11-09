@@ -22,6 +22,12 @@ describe('auth tokens', () => {
     expect(await verifyToken(`Bearer ${token}`, SECRET)).toEqual({ id: 'p-1', role: 'passenger' });
   });
 
+  it('matches the Bearer scheme case-insensitively', async () => {
+    const token = await signToken({ id: 'd-1', role: 'driver' }, SECRET);
+    expect(await verifyToken(`bearer ${token}`, SECRET)).toEqual({ id: 'd-1', role: 'driver' });
+    expect(await verifyToken(`BEARER ${token}`, SECRET)).toEqual({ id: 'd-1', role: 'driver' });
+  });
+
   it('rejects a missing header', async () => {
     await expect401(verifyToken(undefined, SECRET));
     await expect401(verifyToken('', SECRET));

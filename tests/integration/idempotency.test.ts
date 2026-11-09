@@ -1,8 +1,8 @@
-import { GetCommand } from '@aws-sdk/lib-dynamodb';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DeleteCommand, type DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DomainError } from '../../src/domain/errors.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
-import { hashRequest, IdempotencyRepo } from '../../src/infra/dynamo/idempotency-repo.ts';
+import { hashRequest, IDEMPOTENCY_LEASE_SECONDS, IdempotencyRepo } from '../../src/infra/dynamo/idempotency-repo.ts';
 import { createTestTable, deleteTestTable, useFlociEnv } from './helpers/table.ts';
 
 useFlociEnv();
@@ -79,38 +79,118 @@ describe('IdempotencyRepo.run', () => {
       await gate;
       return { status: 201, body: { ok: true } };
     };
-    const a = repo.run('p-1', 'k-conc', 'h', fn).then(
-      (v) => v,
-      (e: unknown) => e,
-    );
-    const b = repo.run('p-1', 'k-conc', 'h', fn).then(
-      (v) => v,
-      (e: unknown) => e,
-    );
-    // let both reach the claim, then let the winner finish
-    await new Promise((r) => setTimeout(r, 300));
-    release();
+    const settle = (p: Promise<unknown>) =>
+      p.then(
+        (v) => v,
+        (e: unknown) => e,
+      );
+    const a = settle(repo.run('p-1', 'k-conc', 'h', fn));
+    const b = settle(repo.run('p-1', 'k-conc', 'h', fn));
+    try {
+      // The winner is blocked on the gate, so the first request to settle is the loser.
+      const loser = await Promise.race([a, b]);
+      expect(loser).toBeInstanceOf(DomainError);
+      expect(loser).toMatchObject({ code: 'REQUEST_IN_PROGRESS', status: 409 });
+    } finally {
+      release();
+    }
     const results = await Promise.all([a, b]);
     expect(calls).toBe(1);
-    const errors = results.filter((r): r is DomainError => r instanceof DomainError);
-    const ok = results.filter((r) => !(r instanceof DomainError));
-    expect(ok).toHaveLength(1);
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toMatchObject({ code: 'REQUEST_IN_PROGRESS', status: 409 });
+    expect(results.filter((r) => r instanceof DomainError)).toHaveLength(1);
+    expect(results.filter((r) => !(r instanceof DomainError))).toEqual([{ status: 201, body: { ok: true }, replayed: false }]);
   });
 
   it('answers 409 REQUEST_IN_PROGRESS for a claim that has no response yet', async () => {
     let release: () => void = () => {};
+    let started: () => void = () => {};
     const gate = new Promise<void>((r) => (release = r));
+    const running = new Promise<void>((r) => (started = r));
     const first = repo.run('p-1', 'k-busy', 'h', async () => {
+      started();
       await gate;
       return { status: 200, body: {} };
     });
-    await new Promise((r) => setTimeout(r, 200));
-    const err = await repo.run('p-1', 'k-busy', 'h', async () => ({ status: 200, body: {} })).catch((e: unknown) => e);
-    expect(err).toMatchObject({ code: 'REQUEST_IN_PROGRESS', status: 409 });
-    release();
+    try {
+      await running;
+      const err = await repo.run('p-1', 'k-busy', 'h', async () => ({ status: 200, body: {} })).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'REQUEST_IN_PROGRESS', status: 409 });
+    } finally {
+      release();
+    }
     await first;
+  });
+});
+
+describe('claim lease and failed cleanup', () => {
+  const failingDeletes = (): DynamoDBDocumentClient =>
+    ({
+      send: (cmd: unknown) => (cmd instanceof DeleteCommand ? Promise.reject(new Error('delete down')) : doc.send(cmd as never)),
+    }) as unknown as DynamoDBDocumentClient;
+
+  it('rethrows the original error, logs the cleanup failure, and lets a retry take over after the lease', async () => {
+    let t = Date.parse('2026-11-09T12:00:00Z');
+    const flaky = new IdempotencyRepo(failingDeletes(), table, () => t);
+    const healthy = new IdempotencyRepo(doc, table, () => t);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(
+        flaky.run('p-9', 'k-lease', 'h', async () => {
+          throw new Error('original');
+        }),
+      ).rejects.toThrow('original');
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+        level: 'error',
+        msg: 'idempotency_cleanup_failed',
+        actorId: 'p-9',
+        key: 'k-lease',
+      });
+    } finally {
+      log.mockRestore();
+    }
+
+    const fn = async () => ({ status: 200, body: { ran: true } });
+    // Inside the lease: still blocked.
+    t += (IDEMPOTENCY_LEASE_SECONDS - 1) * 1000;
+    await expect(healthy.run('p-9', 'k-lease', 'h', fn)).rejects.toMatchObject({ code: 'REQUEST_IN_PROGRESS', status: 409 });
+    // A different request is still refused after expiry.
+    t += 2000;
+    await expect(healthy.run('p-9', 'k-lease', 'other', fn)).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+    // Lease expired: the same request takes over and runs.
+    expect(await healthy.run('p-9', 'k-lease', 'h', fn)).toEqual({ status: 200, body: { ran: true }, replayed: false });
+    expect(await healthy.run('p-9', 'k-lease', 'h', fn)).toMatchObject({ replayed: true });
+  });
+
+  it('lets only one of two concurrent takeovers of an expired lease run fn', async () => {
+    let t = Date.parse('2026-11-09T12:00:00Z');
+    const flaky = new IdempotencyRepo(failingDeletes(), table, () => t);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await flaky.run('p-9', 'k-take', 'h', async () => Promise.reject(new Error('x'))).catch(() => undefined);
+    log.mockRestore();
+    t += (IDEMPOTENCY_LEASE_SECONDS + 1) * 1000;
+    const healthy = new IdempotencyRepo(doc, table, () => t);
+    let calls = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const fn = async () => {
+      calls++;
+      await gate;
+      return { status: 200, body: {} };
+    };
+    const settle = (p: Promise<unknown>) =>
+      p.then(
+        (v) => v,
+        (e: unknown) => e,
+      );
+    const a = settle(healthy.run('p-9', 'k-take', 'h', fn));
+    const b = settle(healthy.run('p-9', 'k-take', 'h', fn));
+    try {
+      expect(await Promise.race([a, b])).toMatchObject({ code: 'REQUEST_IN_PROGRESS' });
+    } finally {
+      release();
+    }
+    await Promise.all([a, b]);
+    expect(calls).toBe(1);
   });
 });
 

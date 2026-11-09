@@ -3,7 +3,7 @@ import { DomainError } from '../domain/errors.ts';
 import type { Actor } from '../domain/trip.ts';
 
 const ALG = 'HS256';
-const BEARER = /^Bearer ([^\s]+)$/;
+const BEARER = /^Bearer ([^\s]+)$/i;
 
 const unauthenticated = (message: string) => new DomainError('UNAUTHENTICATED', 401, message);
 const keyOf = (secret: string) => new TextEncoder().encode(secret);
