@@ -2,14 +2,15 @@ import { DomainError } from '../domain/errors.ts';
 import { toEvent } from '../domain/events.ts';
 import { type Actor, type Trip, transition } from '../domain/trip.ts';
 import { type DriverRepo, notOffered } from '../infra/dynamo/driver-repo.ts';
-import type { TripRepo } from '../infra/dynamo/trip-repo.ts';
+import type { OfferState, TripRepo } from '../infra/dynamo/trip-repo.ts';
 
 /** How many nearby drivers get an offer per `offerTrip` call. */
 export const OFFER_FANOUT = 5;
 
 /**
- * Most offers one trip can collect across repeated `offerTrip` calls. Keeps the retire-on-accept
- * transaction (trip items + driver + one Update per offer) far below DynamoDB's 100-item limit.
+ * Most offers one trip can collect, enforced atomically by the offer write's condition on the trip
+ * item. Keeps the retire-on-accept transaction (3 trip items + driver + one Update per offer, at
+ * most 24 items) far below DynamoDB's 100-item limit.
  */
 export const MAX_OFFERS_PER_TRIP = 20;
 
@@ -32,66 +33,110 @@ export interface Dispatch {
   finishTrip(tripId: string, action: FinishAction, actor: Actor, now: Date): Promise<Trip>;
 }
 
+/** `offerTrip` re-reads and retries this many times when concurrent offer writes move `offerSeq`. */
+export const OFFER_ATTEMPTS = 5;
+
 const tripNotFound = () => new DomainError('TRIP_NOT_FOUND', 404, 'Trip not found');
+const isConcurrentUpdate = (err: unknown) => err instanceof DomainError && err.code === 'CONCURRENT_UPDATE';
 
 export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): Dispatch {
   const { trips, drivers } = deps;
 
-  async function load(tripId: string): Promise<Trip> {
-    const trip = await trips.get(tripId);
-    if (trip === null) throw tripNotFound();
-    return trip;
+  async function load(tripId: string): Promise<{ trip: Trip; offers: OfferState }> {
+    const found = await trips.getWithOffers(tripId);
+    if (found === null) throw tripNotFound();
+    return found;
+  }
+
+  /**
+   * Runs a guarded write, retrying it ONCE on 409 CONCURRENT_UPDATE when only the offer counter
+   * moved (a concurrent `offerTrip`). If the trip itself changed (its version moved), the original
+   * conflict is rethrown, so a lost accept race stays a CONCURRENT_UPDATE.
+   */
+  async function withOfferRetry<T>(tripId: string, write: (trip: Trip, offers: OfferState) => Promise<T>): Promise<T> {
+    let lost: { version: number; err: unknown } | undefined;
+    for (;;) {
+      const { trip, offers } = await load(tripId);
+      if (lost !== undefined && trip.version !== lost.version) throw lost.err;
+      try {
+        return await write(trip, offers);
+      } catch (err) {
+        if (lost !== undefined || !isConcurrentUpdate(err)) throw err;
+        lost = { version: trip.version, err };
+      }
+    }
   }
 
   return {
     async offerTrip(tripId, now = new Date()) {
-      const trip = await load(tripId);
-      if (trip.state !== 'REQUESTED') {
-        throw new DomainError('INVALID_TRANSITION', 409, `Cannot offer a trip in state ${trip.state}`);
+      for (let attempt = 0; attempt < OFFER_ATTEMPTS; attempt++) {
+        const { trip, offers } = await load(tripId);
+        if (trip.state !== 'REQUESTED') {
+          throw new DomainError('INVALID_TRANSITION', 409, `Cannot offer a trip in state ${trip.state}`);
+        }
+        const already = new Set(offers.driverIds);
+        const room = Math.min(OFFER_FANOUT, MAX_OFFERS_PER_TRIP - already.size);
+        if (room <= 0) return [];
+        const ids = (await drivers.availableNear(trip.origin, OFFER_FANOUT + already.size))
+          .map((d) => d.id)
+          .filter((id) => !already.has(id))
+          .slice(0, room);
+        if (ids.length === 0) return [];
+        try {
+          await drivers.putOffers(trip.id, ids, now.toISOString(), {
+            offerSeq: offers.seq,
+            maxOffers: MAX_OFFERS_PER_TRIP,
+          });
+          return ids;
+        } catch (err) {
+          if (!isConcurrentUpdate(err)) throw err;
+        }
       }
-      const already = new Set(await drivers.tripOfferDriverIds(trip.id));
-      const room = Math.min(OFFER_FANOUT, MAX_OFFERS_PER_TRIP - already.size);
-      if (room <= 0) return [];
-      const ids = (await drivers.availableNear(trip.origin, OFFER_FANOUT + already.size))
-        .map((d) => d.id)
-        .filter((id) => !already.has(id))
-        .slice(0, room);
-      await drivers.putOffers(trip.id, ids, now.toISOString());
-      return ids;
+      throw new DomainError('CONCURRENT_UPDATE', 409, 'The trip offers changed concurrently');
     },
 
-    async acceptTrip(tripId, driver, now) {
-      const before = await load(tripId);
-      const offeredTo = await drivers.tripOfferDriverIds(tripId);
-      // Checked before the state machine so a driver without an offer learns nothing about the trip.
-      // The transaction re-checks the offer, so this read is a fast path, not the guarantee.
-      if (driver.role === 'driver' && !offeredTo.includes(driver.id)) throw notOffered();
-      const after = transition(before, { type: 'ACCEPT', driverId: driver.id }, driver, now);
-      // One transaction: trip + outbox + reservation, the accepting driver's offer (must exist),
-      // every other offer leaves the offer index, and the driver goes ON_TRIP.
-      await trips.save(before, after, toEvent(before, after), [
-        ...drivers.retireOfferItems(tripId, offeredTo, driver.id),
-        drivers.takeTripItem(driver.id),
-      ]);
-      return after;
+    acceptTrip(tripId, driver, now) {
+      return withOfferRetry(tripId, async (before, offers) => {
+        // Checked before the state machine so a driver without an offer learns nothing about the trip.
+        // The transaction re-checks the offer item, so this is a fast path, not the guarantee.
+        if (driver.role === 'driver' && !offers.driverIds.includes(driver.id)) throw notOffered();
+        const after = transition(before, { type: 'ACCEPT', driverId: driver.id }, driver, now);
+        // One transaction: trip (guarded on version AND offerSeq) + outbox + reservation, the accepting
+        // driver's offer (must exist), every other offer read at that offerSeq leaves the offer index,
+        // and the driver goes ON_TRIP.
+        await trips.save(
+          before,
+          after,
+          toEvent(before, after),
+          [...drivers.retireOfferItems(tripId, offers.driverIds, driver.id), drivers.takeTripItem(driver.id)],
+          { offerSeq: offers.seq },
+        );
+        return after;
+      });
     },
 
     async listOffers(driverId) {
-      // The index only holds offers of REQUESTED trips; the state filter covers the short window of
-      // an offer written while its trip was being accepted (and GSI lag on AWS).
+      // The index only holds offers of REQUESTED trips; the state filter covers GSI lag on AWS.
       const offered = await trips.getMany(await drivers.offeredTripIds(driverId));
       return offered.filter((t) => t.state === 'REQUESTED');
     },
 
-    async finishTrip(tripId, action, actor, now) {
-      const before = await load(tripId);
-      const after = transition(before, action, actor, now);
-      // CANCEL from REQUESTED: the trip's offers leave the offer index in the same transaction.
-      const retire =
-        before.state === 'REQUESTED' ? drivers.retireOfferItems(tripId, await drivers.tripOfferDriverIds(tripId)) : [];
-      const release = after.driverId === undefined ? [] : await drivers.releaseItems(after.driverId);
-      await trips.save(before, after, toEvent(before, after), [...retire, ...release]);
-      return after;
+    finishTrip(tripId, action, actor, now) {
+      return withOfferRetry(tripId, async (before, offers) => {
+        const after = transition(before, action, actor, now);
+        // CANCEL from REQUESTED: the offers read at this offerSeq leave the offer index, guarded on it.
+        const fromRequested = before.state === 'REQUESTED';
+        const retire = fromRequested ? drivers.retireOfferItems(tripId, offers.driverIds) : [];
+        const release = after.driverId === undefined ? [] : await drivers.releaseItems(after.driverId);
+        await trips.save(
+          before,
+          after,
+          toEvent(before, after),
+          [...retire, ...release],
+          fromRequested ? { offerSeq: offers.seq } : undefined,
+        );
+        return after;
+      });
     },
   };
 }

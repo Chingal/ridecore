@@ -26,8 +26,36 @@ export const TABLE_DEFINITION = {
 
 export const GSI1 = TABLE_DEFINITION.globalSecondaryIndexes[0];
 
-/** Attributes that belong to the storage layout, not to the domain object. */
-export const KEY_ATTRIBUTES: readonly string[] = ['PK', 'SK', 'GSI1PK', 'GSI1SK', 'GSI2PK', 'GSI2SK', 'entity'];
+/** Offer bookkeeping kept on the trip item (dispatch only, not part of the domain Trip). */
+export const OFFER_SEQ = 'offerSeq';
+export const OFFERED_DRIVER_IDS = 'offeredDriverIds';
+
+/** Attributes that belong to the storage layout or dispatch bookkeeping, not to the domain object. */
+export const KEY_ATTRIBUTES: readonly string[] = [
+  'PK',
+  'SK',
+  'GSI1PK',
+  'GSI1SK',
+  'GSI2PK',
+  'GSI2SK',
+  'entity',
+  OFFER_SEQ,
+  OFFERED_DRIVER_IDS,
+];
+
+export type ConditionPart = { expression: string; names: Record<string, string>; values: Record<string, unknown> };
+
+/**
+ * Condition that the trip's offer counter is still `seen` (a trip never offered has no counter,
+ * which counts as 0). Shared by offer writes and by the transitions that retire offers.
+ */
+export function offerSeqGuard(seen: number): ConditionPart {
+  return {
+    expression: seen === 0 ? '(attribute_not_exists(#offerSeq) OR #offerSeq = :seenOfferSeq)' : '#offerSeq = :seenOfferSeq',
+    names: { '#offerSeq': OFFER_SEQ },
+    values: { ':seenOfferSeq': seen },
+  };
+}
 
 export type ReservationKind = 'PASSENGER' | 'DRIVER';
 

@@ -22,7 +22,9 @@ import {
   KEY_ATTRIBUTES,
   OFFER_PREFIX,
   offerGsi1,
+  OFFERED_DRIVER_IDS,
   offerKey,
+  offerSeqGuard,
   tripKey,
 } from './keys.ts';
 import type { ExtraItem } from './trip-repo.ts';
@@ -142,22 +144,41 @@ export class DriverRepo {
   }
 
   /**
-   * Writes one offer item per driver (re-offering overwrites), in one transaction with a check that
-   * the trip is still REQUESTED, so an offer racing with an accept/cancel is refused (409 INVALID_TRANSITION).
+   * Offers the trip to `driverIds` in ONE transaction: the trip item gets the ids ADDed to its
+   * `offeredDriverIds` set and `offerSeq` incremented (its `version` is untouched, so offers never
+   * conflict with the trip lifecycle), conditioned on the trip still being REQUESTED, `offerSeq`
+   * still being `guard.offerSeq` and the set leaving room for the new ids (at most `guard.maxOffers`);
+   * the same transaction puts the offer items. Any failed condition is 409 CONCURRENT_UPDATE: the
+   * caller re-reads the trip to tell a moved counter from a trip that left REQUESTED.
    */
-  async putOffers(tripId: string, driverIds: readonly string[], createdAt: string): Promise<void> {
+  async putOffers(
+    tripId: string,
+    driverIds: readonly string[],
+    createdAt: string,
+    guard: { offerSeq: number; maxOffers: number },
+  ): Promise<void> {
     if (driverIds.length === 0) return;
+    const seq = offerSeqGuard(guard.offerSeq);
     try {
       await this.doc.send(
         new TransactWriteCommand({
           TransactItems: [
             {
-              ConditionCheck: {
+              Update: {
                 TableName: this.tableName,
                 Key: tripKey(tripId),
-                ConditionExpression: '#state = :requested',
-                ExpressionAttributeNames: { '#state': 'state' },
-                ExpressionAttributeValues: { ':requested': 'REQUESTED' },
+                UpdateExpression: 'SET #offerSeq = :nextOfferSeq ADD #offered :newIds',
+                ConditionExpression:
+                  `#state = :requested AND ${seq.expression} ` +
+                  'AND (attribute_not_exists(#offered) OR size(#offered) <= :roomLeft)',
+                ExpressionAttributeNames: { '#state': 'state', '#offered': OFFERED_DRIVER_IDS, ...seq.names },
+                ExpressionAttributeValues: {
+                  ':requested': 'REQUESTED',
+                  ':nextOfferSeq': guard.offerSeq + 1,
+                  ':newIds': new Set(driverIds),
+                  ':roomLeft': guard.maxOffers - driverIds.length,
+                  ...seq.values,
+                },
               },
             },
             ...driverIds.map((driverId) => ({
@@ -177,27 +198,17 @@ export class DriverRepo {
         }),
       );
     } catch (err) {
-      if (err instanceof TransactionCanceledException && err.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed') {
-        throw new DomainError('INVALID_TRANSITION', 409, 'The trip is no longer REQUESTED');
+      if (err instanceof TransactionCanceledException) {
+        throw new DomainError('CONCURRENT_UPDATE', 409, 'The trip offers changed concurrently');
       }
       throw err;
     }
   }
 
-  /** Ids of the drivers holding an offer for the trip (indexed or retired), from the base table. */
-  async tripOfferDriverIds(tripId: string): Promise<string[]> {
-    const items = await this.queryAll({
-      TableName: this.tableName,
-      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :offer)',
-      ExpressionAttributeValues: { ':pk': tripKey(tripId).PK, ':offer': OFFER_PREFIX },
-      ConsistentRead: true,
-    });
-    return items.flatMap((item) => (typeof item.driverId === 'string' ? [item.driverId] : []));
-  }
-
   /**
    * Trip ids with a pending offer for the driver, newest first. Only offers of REQUESTED trips are
-   * in this index (see `retireOfferItems`), so the set is bounded; all pages are read up to the cap.
+   * in this index (offers are retired, under the trip's `offerSeq` guard, when the trip leaves
+   * REQUESTED), so the set is bounded; all pages are read up to the query cap.
    */
   async offeredTripIds(driverId: string): Promise<string[]> {
     const items = await this.queryAll({
@@ -213,7 +224,8 @@ export class DriverRepo {
 
   /**
    * Transaction items that take every offer of a trip leaving REQUESTED out of the drivers' offer
-   * index (the items stay as history). For the accepting driver, the same Update also requires its
+   * index (the items stay as history). Pass the ids read with the `offerSeq` the trip write is
+   * guarded on (`TripRepo.save(..., { offerSeq })`), so no concurrently written offer is missed. For the accepting driver, the same Update also requires its
    * offer to exist (404 NOT_OFFERED): a transaction cannot touch the offer item twice.
    */
   retireOfferItems(tripId: string, driverIds: readonly string[], acceptingDriverId?: string): ExtraItem[] {

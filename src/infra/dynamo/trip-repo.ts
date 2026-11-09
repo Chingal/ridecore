@@ -13,6 +13,9 @@ import type { Trip } from '../../domain/trip.ts';
 import {
   GSI1,
   KEY_ATTRIBUTES,
+  OFFER_SEQ,
+  OFFERED_DRIVER_IDS,
+  offerSeqGuard,
   outboxKey,
   passengerGsi1Pk,
   type ReservationKind,
@@ -51,6 +54,12 @@ const BATCH_GET_MAX_KEYS = 100;
 const BATCH_GET_MAX_ATTEMPTS = 5;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Dispatch bookkeeping stored on the trip item: who holds an offer, and a counter bumped per offer write. */
+export type OfferState = { seq: number; driverIds: string[] };
+
+/** Extra condition for `save`: the trip's offer counter must still be the one that was read. */
+export type SaveGuard = { offerSeq: number };
 
 type TaggedItem = { item: TransactWriteItem; priority: number; error: () => DomainError };
 
@@ -100,9 +109,33 @@ export class TripRepo {
    * A failed condition on an extra item tagged with `onConditionFailed` raises that error, unless a
    * trip-level conflict (stale version, busy driver...) also failed; untagged extras map to 409
    * CONCURRENT_UPDATE. Extras are sent after the trip items, in the given order.
+   * With `guard.offerSeq`, the trip write also requires the offer counter to be unchanged (409
+   * CONCURRENT_UPDATE otherwise), so retiring the offers read at that counter cannot miss one.
+   * The trip Put replaces the item, so the offer bookkeeping is dropped once the trip is saved.
    */
-  async save(before: Trip, after: Trip, event: TripEvent, extraItems: ExtraItem[] = []): Promise<void> {
-    await this.transact([...this.saveItems(before, after, event), ...extraItems.map(tagExtra)]);
+  async save(
+    before: Trip,
+    after: Trip,
+    event: TripEvent,
+    extraItems: ExtraItem[] = [],
+    guard?: SaveGuard,
+  ): Promise<void> {
+    await this.transact([...this.saveItems(before, after, event, guard), ...extraItems.map(tagExtra)]);
+  }
+
+  /** The trip plus its offer bookkeeping, from ONE consistent read. */
+  async getWithOffers(id: string): Promise<{ trip: Trip; offers: OfferState } | null> {
+    const res = await this.doc.send(new GetCommand({ TableName: this.tableName, Key: tripKey(id), ConsistentRead: true }));
+    if (!res.Item) return null;
+    const seq = res.Item[OFFER_SEQ];
+    const ids: unknown = res.Item[OFFERED_DRIVER_IDS];
+    return {
+      trip: toTrip(res.Item),
+      offers: {
+        seq: typeof seq === 'number' ? seq : 0,
+        driverIds: ids instanceof Set ? [...(ids as Set<unknown>)].filter((v): v is string => typeof v === 'string') : [],
+      },
+    };
   }
 
   async get(id: string): Promise<Trip | null> {
@@ -161,17 +194,18 @@ export class TripRepo {
     return typeof tripId === 'string' ? tripId : null;
   }
 
-  private saveItems(before: Trip, after: Trip, event: TripEvent): TaggedItem[] {
+  private saveItems(before: Trip, after: Trip, event: TripEvent, guard?: SaveGuard): TaggedItem[] {
     if (before.id !== after.id) throw new Error('save: before and after must be the same trip');
+    const offers = guard === undefined ? undefined : offerSeqGuard(guard.offerSeq);
     const items: TaggedItem[] = [
       tag(
         {
           Put: {
             TableName: this.tableName,
             Item: this.tripItem(after),
-            ConditionExpression: '#version = :expected',
-            ExpressionAttributeNames: { '#version': 'version' },
-            ExpressionAttributeValues: { ':expected': before.version },
+            ConditionExpression: offers === undefined ? '#version = :expected' : `#version = :expected AND ${offers.expression}`,
+            ExpressionAttributeNames: { '#version': 'version', ...offers?.names },
+            ExpressionAttributeValues: { ':expected': before.version, ...offers?.values },
           },
         },
         CONFLICTS.staleVersion,

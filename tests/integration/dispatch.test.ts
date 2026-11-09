@@ -118,6 +118,23 @@ async function indexedOfferTripIds(driverId: string): Promise<string[]> {
   return (res.Items ?? []).map((i) => String(i.tripId));
 }
 
+/**
+ * A dispatch whose FIRST trip write is preceded by `hook`: deterministically lands a concurrent
+ * write between the service's read of the trip and its transaction.
+ */
+function dispatchWithHookBeforeSave(hook: () => Promise<unknown>): Dispatch {
+  let fired = false;
+  const racing = Object.create(trips) as TripRepo;
+  racing.save = async (...args: Parameters<TripRepo['save']>) => {
+    if (!fired) {
+      fired = true;
+      await hook();
+    }
+    return trips.save(...args);
+  };
+  return createDispatch({ trips: racing, drivers });
+}
+
 const nearIds = async (p: LatLng, limit = 10) => (await drivers.availableNear(p, limit)).map((d) => d.id);
 
 describe('dispatch (DynamoDB on Floci)', () => {
@@ -185,8 +202,12 @@ describe('dispatch (DynamoDB on Floci)', () => {
     await dispatch.offerTrip(trip.id);
     await dispatch.acceptTrip(trip.id, asDriver(d), BASE);
     await expectDomainError(dispatch.offerTrip(trip.id), 'INVALID_TRANSITION', 409);
-    // The offer write itself re-checks the trip state (offerTrip racing with an accept).
-    await expectDomainError(drivers.putOffers(trip.id, [d], BASE.toISOString()), 'INVALID_TRANSITION', 409);
+    // The offer write itself re-checks the trip (state + offerSeq) inside its transaction.
+    await expectDomainError(
+      drivers.putOffers(trip.id, [d], BASE.toISOString(), { offerSeq: 1, maxOffers: MAX_OFFERS_PER_TRIP }),
+      'CONCURRENT_UPDATE',
+      409,
+    );
   });
 
   it('accept by a driver who was not offered the trip -> 404 NOT_OFFERED, nothing written', async () => {
@@ -338,5 +359,94 @@ describe('dispatch (DynamoDB on Floci)', () => {
     }
     expect(offered.size).toBe(MAX_OFFERS_PER_TRIP);
     expect(await dispatch.offerTrip(trip.id, BASE)).toEqual([]);
+  });
+  it('concurrent offerTrip calls never push a trip past MAX_OFFERS_PER_TRIP, and accept retires them all', async () => {
+    const origin: LatLng = { lat: 4.4389, lng: -75.2322 }; // Ibague
+    const seeded: string[] = [];
+    for (let i = 0; i < 30; i++) seeded.push(await seedDriver(north(origin, 0.1 + i * 0.08)));
+    const trip = await requestTrip(origin);
+
+    const results = await Promise.allSettled(Array.from({ length: 12 }, () => dispatch.offerTrip(trip.id, BASE)));
+
+    for (const r of results) {
+      if (r.status === 'rejected') expect(r.reason).toMatchObject({ code: 'CONCURRENT_UPDATE', status: 409 });
+    }
+    const perCall = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
+    const union = perCall.flat();
+    expect(new Set(union).size).toBe(union.length); // no driver offered twice
+    expect(union.length).toBeLessThanOrEqual(MAX_OFFERS_PER_TRIP);
+
+    const stored = await trips.getWithOffers(trip.id);
+    expect(stored?.offers.driverIds.sort()).toEqual([...union].sort());
+    expect(stored?.offers.seq).toBe(perCall.filter((ids) => ids.length > 0).length);
+    const offerItems = await doc.send(
+      new QueryCommand({
+        TableName: table,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :offer)',
+        ExpressionAttributeValues: { ':pk': `TRIP#${trip.id}`, ':offer': 'OFFER#' },
+        ConsistentRead: true,
+      }),
+    );
+    expect(offerItems.Items?.map((i) => String(i.driverId)).sort()).toEqual([...union].sort());
+
+    // Fill up to the cap, then nothing more is offered.
+    let more = await dispatch.offerTrip(trip.id, BASE);
+    while (more.length > 0) more = await dispatch.offerTrip(trip.id, BASE);
+    const full = await trips.getWithOffers(trip.id);
+    expect(full?.offers.driverIds).toHaveLength(MAX_OFFERS_PER_TRIP);
+
+    // Accepting retires all 20 offers in one transaction.
+    const winner = full?.offers.driverIds[0] ?? '';
+    await dispatch.acceptTrip(trip.id, asDriver(winner), BASE);
+    for (const d of seeded) expect(await indexedOfferTripIds(d)).not.toContain(trip.id);
+  });
+
+  it('an offer racing an accept or a cancel is rejected or retired: no terminal trip stays indexed', async () => {
+    const origin: LatLng = { lat: 5.5353, lng: -73.3678 }; // Tunja
+    for (let i = 0; i < 6; i++) {
+      const d1 = await seedDriver(north(origin, 0.2));
+      const trip = await requestTrip(origin);
+      expect(await dispatch.offerTrip(trip.id, BASE)).toEqual([d1]);
+      const d2 = await seedDriver(north(origin, 0.5));
+      const d3 = await seedDriver(north(origin, 0.8));
+
+      const lifecycle =
+        i % 2 === 0
+          ? dispatch.acceptTrip(trip.id, asDriver(d1), BASE)
+          : dispatch.finishTrip(trip.id, { type: 'CANCEL' }, { id: trip.passengerId, role: 'passenger' }, BASE);
+      const [done, offer] = await Promise.allSettled([lifecycle, dispatch.offerTrip(trip.id, BASE)]);
+
+      expect(done.status).toBe('fulfilled');
+      if (offer.status === 'rejected') expect(offer.reason).toMatchObject({ status: 409 });
+      expect((await trips.get(trip.id))?.state).toBe(i % 2 === 0 ? 'ACCEPTED' : 'CANCELLED');
+      for (const d of [d1, d2, d3]) expect(await indexedOfferTripIds(d)).not.toContain(trip.id);
+
+      for (const d of i % 2 === 0 ? [d2, d3] : [d1, d2, d3]) await drivers.setAvailability(d, 'OFFLINE');
+    }
+  });
+  it('an offer committed between the read and the accept/cancel transaction is retired too (deterministic)', async () => {
+    const origin: LatLng = { lat: 3.8801, lng: -77.0312 }; // Buenaventura
+    for (const kind of ['accept', 'cancel'] as const) {
+      const d1 = await seedDriver(north(origin, 0.2));
+      const trip = await requestTrip(origin);
+      expect(await dispatch.offerTrip(trip.id, BASE)).toEqual([d1]);
+      const d2 = await seedDriver(north(origin, 0.5));
+
+      let lateOffer: string[] = [];
+      const racing = dispatchWithHookBeforeSave(async () => {
+        lateOffer = await dispatch.offerTrip(trip.id, BASE);
+      });
+      const done =
+        kind === 'accept'
+          ? await racing.acceptTrip(trip.id, asDriver(d1), BASE)
+          : await racing.finishTrip(trip.id, { type: 'CANCEL' }, { id: trip.passengerId, role: 'passenger' }, BASE);
+
+      expect(lateOffer).toEqual([d2]); // the offer really landed mid-flight
+      expect(done).toMatchObject({ state: kind === 'accept' ? 'ACCEPTED' : 'CANCELLED', version: 2 });
+      expect(await indexedOfferTripIds(d1)).not.toContain(trip.id);
+      expect(await indexedOfferTripIds(d2)).not.toContain(trip.id);
+
+      for (const d of kind === 'accept' ? [d2] : [d1, d2]) await drivers.setAvailability(d, 'OFFLINE');
+    }
   });
 });
