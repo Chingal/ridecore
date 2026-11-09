@@ -1,0 +1,10 @@
+services:
+  floci:
+    image: floci/floci:2.4.0
+    ports:
+      - "127.0.0.1:4567:4566"
+    environment:
+      FLOCI_BASE_URL: http://localhost:4567
+      FLOCI_STORAGE_MODE: memory
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
