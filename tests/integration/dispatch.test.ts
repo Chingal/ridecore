@@ -43,6 +43,7 @@ const MANIZALES: LatLng = { lat: 5.0703, lng: -75.5138 };
 const VILLAVICENCIO: LatLng = { lat: 4.142, lng: -73.6266 };
 const BARRANQUILLA: LatLng = { lat: 10.9685, lng: -74.7813 };
 const CARTAGENA: LatLng = { lat: 10.391, lng: -75.4794 };
+const SANTA_MARTA: LatLng = { lat: 11.2408, lng: -74.199 };
 
 /** A point `km` north of `p` (1 degree of latitude ~ 111.2 km). */
 const north = (p: LatLng, km: number): LatLng => ({ lat: p.lat + km / 111.2, lng: p.lng });
@@ -288,5 +289,18 @@ describe('dispatch (DynamoDB on Floci)', () => {
     const passenger: Actor = { id: other.passengerId, role: 'passenger' };
     expect(await dispatch.finishTrip(other.id, { type: 'CANCEL' }, passenger, BASE)).toMatchObject({ state: 'CANCELLED' });
     await expectDomainError(dispatch.finishTrip(randomUUID(), { type: 'CANCEL' }, passenger, BASE), 'TRIP_NOT_FOUND', 404);
+  });
+  it('listOffers still finds an older pending offer behind 50 newer terminal offers', async () => {
+    const d = await seedDriver(north(SANTA_MARTA, 0.5));
+    const pending = await requestTrip(SANTA_MARTA);
+    expect(await dispatch.offerTrip(pending.id, BASE)).toEqual([d]);
+
+    for (let i = 1; i <= 50; i++) {
+      const trip = await requestTrip(SANTA_MARTA);
+      expect(await dispatch.offerTrip(trip.id, new Date(BASE.getTime() + i * 1000))).toEqual([d]);
+      await dispatch.finishTrip(trip.id, { type: 'CANCEL' }, { id: trip.passengerId, role: 'passenger' }, BASE);
+    }
+
+    expect((await dispatch.listOffers(d)).map((t) => t.id)).toEqual([pending.id]);
   });
 });

@@ -4,6 +4,7 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  type QueryCommandInput,
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -160,20 +161,20 @@ export class DriverRepo {
     return res.Item !== undefined;
   }
 
-  /** Trip ids offered to the driver, newest offer first. */
-  async offeredTripIds(driverId: string, limit = 50): Promise<string[]> {
-    const res = await this.doc.send(
-      new QueryCommand({
-        TableName: this.tableName,
-        IndexName: GSI1.indexName,
-        KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :offer)',
-        ExpressionAttributeNames: { '#pk': GSI1.partitionKey, '#sk': GSI1.sortKey },
-        ExpressionAttributeValues: { ':pk': driverGsi1Pk(driverId), ':offer': OFFER_PREFIX },
-        ScanIndexForward: false,
-        Limit: limit,
-      }),
-    );
-    return (res.Items ?? []).flatMap((item) => (typeof item.tripId === 'string' ? [item.tripId] : []));
+  /**
+   * Trip ids offered to the driver, newest offer first. Offers are never deleted, so this reads
+   * every page: a page limit would let newer offers for finished trips hide an older pending one.
+   */
+  async offeredTripIds(driverId: string): Promise<string[]> {
+    const items = await this.queryAll({
+      TableName: this.tableName,
+      IndexName: GSI1.indexName,
+      KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :offer)',
+      ExpressionAttributeNames: { '#pk': GSI1.partitionKey, '#sk': GSI1.sortKey },
+      ExpressionAttributeValues: { ':pk': driverGsi1Pk(driverId), ':offer': OFFER_PREFIX },
+      ScanIndexForward: false,
+    });
+    return items.flatMap((item) => (typeof item.tripId === 'string' ? [item.tripId] : []));
   }
 
   /** Accept-transaction items: the offer must exist (404 NOT_OFFERED). */
@@ -244,17 +245,30 @@ export class DriverRepo {
     ];
   }
 
+  /** Every driver indexed in the cell (all query pages, so ranking never misses a closer driver). */
   private async queryCell(cell: string): Promise<Driver[]> {
-    const res = await this.doc.send(
-      new QueryCommand({
-        TableName: this.tableName,
-        IndexName: GSI2.indexName,
-        KeyConditionExpression: '#pk = :pk',
-        ExpressionAttributeNames: { '#pk': GSI2.partitionKey },
-        ExpressionAttributeValues: { ':pk': availabilityCellPk(cell) },
-      }),
-    );
-    return (res.Items ?? []).map(toDriver);
+    const items = await this.queryAll({
+      TableName: this.tableName,
+      IndexName: GSI2.indexName,
+      KeyConditionExpression: '#pk = :pk',
+      ExpressionAttributeNames: { '#pk': GSI2.partitionKey },
+      ExpressionAttributeValues: { ':pk': availabilityCellPk(cell) },
+    });
+    return items.map(toDriver);
+  }
+
+  /** Runs a query to the end, following `LastEvaluatedKey` across pages. */
+  private async queryAll(input: QueryCommandInput): Promise<Record<string, unknown>[]> {
+    const items: Record<string, unknown>[] = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const res = await this.doc.send(
+        new QueryCommand({ ...input, ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }) }),
+      );
+      items.push(...(res.Items ?? []));
+      startKey = res.LastEvaluatedKey;
+    } while (startKey !== undefined);
+    return items;
   }
 
   /**
