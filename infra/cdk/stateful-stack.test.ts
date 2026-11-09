@@ -1,9 +1,10 @@
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { StatefulStack } from './stateful-stack.ts';
 
 describe('StatefulStack', () => {
+  vi.stubEnv('RIDECORE_TABLE', undefined); // default table name, regardless of the caller's env
   const template = Template.fromStack(new StatefulStack(new App(), 'T'));
 
   it('defines exactly one DynamoDB table with keys, GSIs, stream, TTL and on-demand billing', () => {
