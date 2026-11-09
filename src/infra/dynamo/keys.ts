@@ -98,3 +98,5 @@ export const offerGsi1 = (driverId: string, createdAt: string) => ({
 });
 
 export const driverGsi1Pk = (driverId: string) => `DRIVER#${driverId}`;
+
+export const idempotencyKey = (actorId: string, key: string) => ({ PK: `IDEM#${actorId}#${key}`, SK: 'META' });

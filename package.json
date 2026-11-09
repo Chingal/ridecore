@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
-    "test:e2e": "vitest run --project e2e"
+    "test:e2e": "vitest run --project e2e",
+    "token": "node scripts/dev-token.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -28,6 +29,7 @@
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1165.0",
     "@aws-sdk/lib-dynamodb": "^3.1165.0",
+    "jose": "^6.2.17",
     "ngeohash": "^0.6.3"
   }
 }
