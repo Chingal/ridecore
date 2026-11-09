@@ -52,12 +52,27 @@ export function createDeps(opts: DepsOptions): Deps {
   };
 }
 
+/** Shortest HS256 secret accepted from the environment (256 bits of key material at one byte per char). */
+export const MIN_JWT_SECRET_LENGTH = 32;
+
+/**
+ * The JWT secret from `RIDECORE_JWT_SECRET`. Fails closed: there is no default, and a missing or
+ * short value is a configuration error, never an empty or well-known key.
+ */
+export function jwtSecretFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  const secret = env.RIDECORE_JWT_SECRET;
+  if (secret === undefined || secret === '') throw new Error('RIDECORE_JWT_SECRET is not set');
+  if (secret.length < MIN_JWT_SECRET_LENGTH) {
+    throw new Error(`RIDECORE_JWT_SECRET must be at least ${MIN_JWT_SECRET_LENGTH} characters`);
+  }
+  return secret;
+}
+
 /** Composition root for Lambda: table and JWT secret from `RIDECORE_TABLE` / `RIDECORE_JWT_SECRET`. */
 export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): Deps {
   const table = env.RIDECORE_TABLE;
-  const jwtSecret = env.RIDECORE_JWT_SECRET;
   if (!table) throw new Error('RIDECORE_TABLE is not set');
-  if (!jwtSecret) throw new Error('RIDECORE_JWT_SECRET is not set');
+  const jwtSecret = jwtSecretFromEnv(env);
   return createDeps({ doc: createDocumentClient(), table, jwtSecret });
 }
 

@@ -24,9 +24,10 @@ deploy-stateful:
 	$(FLOCI_ENV) npx cdk deploy RidecoreStateful --require-approval never --outputs-file cdk-outputs.json
 
 # One-way link: the table name comes from the CDK output; osls never feeds anything back to CDK.
+# The JWT secret is the non-secret dev value from .env.example (no default in serverless.yml).
 # Writes .env.local with RIDECORE_TABLE and RIDECORE_API_URL (Floci's HTTP API path for the stack).
 deploy-api: build
-	@set -e; \
+	@set -e; $(LOAD_ENV); \
 	table=$$(node -p "require('./cdk-outputs.json').RidecoreStateful.TableName"); \
 	$(FLOCI_ENV) RIDECORE_TABLE="$$table" npx serverless deploy; \
 	api_id=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's/^ *HttpApiId: *//p'); \
@@ -41,8 +42,9 @@ build:
 	npm run build
 
 # Packages the Lambda without any AWS access (dummy credentials, no login).
+# serverless.yml has no JWT secret default, so the dev value is loaded from .env.example here.
 package: build
-	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
+	$(LOAD_ENV) && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
 
 seed:
 	npm run seed

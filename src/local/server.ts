@@ -1,7 +1,8 @@
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
-import { type ApiHandler, handler } from '../http/handler.ts';
+import { depsFromEnv } from '../http/deps.ts';
+import { type ApiHandler, createHandler, handler } from '../http/handler.ts';
 import { INTERNAL_MESSAGE } from '../http/respond.ts';
 import { matchRoute } from '../http/routes.ts';
 
@@ -84,7 +85,8 @@ export function startLocalServer(port = 3000, api: ApiHandler = handler): Promis
 
 if (import.meta.main) {
   const port = Number(process.env.PORT ?? 3000);
-  const server = await startLocalServer(port);
+  // Build the dependencies now, so a missing table name or JWT secret stops the server at startup.
+  const server = await startLocalServer(port, createHandler(depsFromEnv()));
   console.log(JSON.stringify({ level: 'info', msg: 'local API listening', url: `http://localhost:${port}` }));
   const stop = () => server.close(() => process.exit(0));
   process.on('SIGINT', stop);

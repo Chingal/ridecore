@@ -14,8 +14,9 @@ provider:
   environment:
     # One-way reference: the Makefile reads the CDK stack output `TableName` and exports it here.
     RIDECORE_TABLE: ${env:RIDECORE_TABLE, 'ridecore'}
-    # Fixed non-secret dev value (.env.example) for local and CI only.
-    RIDECORE_JWT_SECRET: ${env:RIDECORE_JWT_SECRET, 'dev-only-not-a-secret-change-me'}
+    # No default: package and deploy fail when it is unset. Local and CI load the non-secret dev
+    # value from .env.example (Makefile); a real stage resolves it from SSM or Secrets Manager.
+    RIDECORE_JWT_SECRET: ${env:RIDECORE_JWT_SECRET}
   iam:
     role:
       statements:

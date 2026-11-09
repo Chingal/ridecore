@@ -15,7 +15,8 @@ import { useFlociEnv } from '../integration/helpers/table.ts';
 useFlociEnv();
 const API = (process.env.RIDECORE_API_URL ?? 'http://localhost:3000').replace(/\/$/, '');
 const TABLE = process.env.RIDECORE_TABLE ?? 'ridecore';
-const SECRET = process.env.RIDECORE_JWT_SECRET ?? 'dev-only-not-a-secret-change-me';
+const SECRET = process.env.RIDECORE_JWT_SECRET ?? '';
+if (SECRET === '') throw new Error('RIDECORE_JWT_SECRET is not set: run through `make e2e` / `make e2e-local` (they load .env.example)');
 
 const doc = createDocumentClient(createDynamoClient());
 // Offering a trip to drivers is an asynchronous consumer of `trip.requested` (Plan 2); no HTTP route
