@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# No secrets anywhere: Floci is local AWS with dummy credentials, and the dev JWT secret
+# comes from .env.example through the env loader (scripts/load-env.ts).
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - name: CDK synth
+        run: npx cdk synth --quiet
+        env:
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+      - name: Package the Lambda (osls)
+        run: make package
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Floci runs the Lambda in Docker, so it needs the host docker.sock (a service container can't).
+      # `make up` starts it too (idempotent); starting it first keeps the log of a failure readable.
+      - name: Start Floci
+        run: docker compose up -d --wait floci
+      - name: Deploy (CDK bootstrap + stack, osls deploy, seed)
+        run: make up
+      - run: npm run test:integration
+      - name: End-to-end trip against the Floci-deployed Lambda
+        run: make e2e
+      - name: Floci logs
+        if: failure()
+        run: docker compose logs floci --tail 200
+      - name: Stop Floci
+        if: always()
+        run: make down
+
+  node24:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+      # src/local/server.ts uses import.meta.main (Node 24.2+).
+      - name: Require Node >= 24.2
+        run: node -e "const [a,b]=process.versions.node.split('.').map(Number); if (a!==24||b<2) { console.error('Node '+process.version); process.exit(1) }"
+      - run: npm ci
+      - run: npm run test:unit
+      - name: Start Floci
+        run: docker compose up -d --wait floci
+      - run: npm run test:integration
+      - name: Stop Floci
+        if: always()
+        run: docker compose down
