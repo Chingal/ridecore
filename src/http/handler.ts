@@ -4,7 +4,8 @@ import type { DriverService } from '../app/drivers.ts';
 import type { TripService } from '../app/trips.ts';
 import { DomainError } from '../domain/errors.ts';
 import type { Actor } from '../domain/trip.ts';
-import { hashRequest } from '../infra/dynamo/idempotency-repo.ts';
+import { type Complete, hashRequest } from '../infra/dynamo/idempotency-repo.ts';
+import type { ResultItem } from '../infra/dynamo/transact.ts';
 import { verifyToken } from './auth.ts';
 import { type Deps, jsonLog, type LogLine, services } from './deps.ts';
 import { errorJson, json, toErrorInfo } from './respond.ts';
@@ -24,8 +25,12 @@ export type ApiHandler = (event: APIGatewayProxyEventV2) => Promise<APIGatewayPr
 type Result = { status: number; body: unknown; headers?: Record<string, string> };
 type Request = { actor: Actor; params: Record<string, string>; body: () => unknown; now: Date };
 type Services = { trips: TripService; drivers: DriverService };
-/** Validated input (hashed for Idempotency-Key) plus the use case to run with it. */
-type Prepared = { input: unknown; run: () => Promise<Result> };
+/**
+ * Validated input (hashed for Idempotency-Key) plus the use case to run with it. With an
+ * Idempotency-Key, `run` gets `complete`, and the use case writes the response through it in the
+ * same transaction as its business write.
+ */
+type Prepared = { input: unknown; run: (complete?: Complete<unknown>) => Promise<Result> };
 type Endpoint = (req: Request, svc: Services) => Prepared;
 
 const CORRELATION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -33,35 +38,42 @@ const CORRELATION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const ok = async (work: Promise<unknown>): Promise<Result> => ({ status: 200, body: await work });
 const tripRef = (req: Request) => ({ tripId: req.params.id ?? '' });
 /** Routes without a body: the body is ignored, nothing to hash beyond method and path. */
-const bodyless = (run: () => Promise<Result>): Prepared => ({ input: null, run });
+const bodyless = (run: Prepared['run']): Prepared => ({ input: null, run });
+/** The completion item for a response with `status`, built from the use case's result. */
+const commitAs = <R>(complete: Complete<unknown> | undefined, status: number): ResultItem<R> | undefined =>
+  complete === undefined ? undefined : (body) => complete(status, body);
 
 /** Parse/validate first (400 before any write or idempotency claim), then run the use case. */
 const ENDPOINTS: Record<RouteName, Endpoint> = {
   requestTrip: (req, s) => {
     const input = parseRequestTrip(req.body());
-    return { input, run: async () => ({ status: 201, body: await s.trips.requestTrip(req.actor, input, req.now) }) };
+    return {
+      input,
+      run: async (c) => ({ status: 201, body: await s.trips.requestTrip(req.actor, input, req.now, commitAs(c, 201)) }),
+    };
   },
   getTrip: (req, s) => bodyless(() => ok(s.trips.getTrip(req.actor, tripRef(req), req.now))),
   listMyTrips: (req, s) => bodyless(async () => ({ status: 200, body: { items: await s.trips.listMyTrips(req.actor, {}, req.now) } })),
   cancelTrip: (req, s) => {
     const input = parseCancel(req.body());
-    return { input, run: () => ok(s.trips.cancelTrip(req.actor, { ...tripRef(req), ...input }, req.now)) };
+    return { input, run: (c) => ok(s.trips.cancelTrip(req.actor, { ...tripRef(req), ...input }, req.now, commitAs(c, 200))) };
   },
   rateTrip: (req, s) => {
     const input = parseRating(req.body());
-    return { input, run: () => ok(s.trips.rateTrip(req.actor, { ...tripRef(req), ...input }, req.now)) };
+    return { input, run: (c) => ok(s.trips.rateTrip(req.actor, { ...tripRef(req), ...input }, req.now, commitAs(c, 200))) };
   },
-  acceptTrip: (req, s) => bodyless(() => ok(s.trips.acceptTrip(req.actor, tripRef(req), req.now))),
-  arriveTrip: (req, s) => bodyless(() => ok(s.trips.advanceTrip('ARRIVE')(req.actor, tripRef(req), req.now))),
-  startTrip: (req, s) => bodyless(() => ok(s.trips.advanceTrip('START')(req.actor, tripRef(req), req.now))),
-  completeTrip: (req, s) => bodyless(() => ok(s.trips.advanceTrip('COMPLETE')(req.actor, tripRef(req), req.now))),
+  acceptTrip: (req, s) => bodyless((c) => ok(s.trips.acceptTrip(req.actor, tripRef(req), req.now, commitAs(c, 200)))),
+  arriveTrip: (req, s) => bodyless((c) => ok(s.trips.advanceTrip('ARRIVE')(req.actor, tripRef(req), req.now, commitAs(c, 200)))),
+  startTrip: (req, s) => bodyless((c) => ok(s.trips.advanceTrip('START')(req.actor, tripRef(req), req.now, commitAs(c, 200)))),
+  completeTrip: (req, s) =>
+    bodyless((c) => ok(s.trips.advanceTrip('COMPLETE')(req.actor, tripRef(req), req.now, commitAs(c, 200)))),
   setAvailability: (req, s) => {
     const input = parseAvailability(req.body());
-    return { input, run: () => ok(s.drivers.setAvailability(req.actor, input)) };
+    return { input, run: (c) => ok(s.drivers.setAvailability(req.actor, input, commitAs(c, 200))) };
   },
   setPosition: (req, s) => {
     const input = parsePosition(req.body());
-    return { input, run: () => ok(s.drivers.setPosition(req.actor, input)) };
+    return { input, run: (c) => ok(s.drivers.setPosition(req.actor, input, commitAs(c, 200))) };
   },
   listOffers: (req, s) => bodyless(async () => ({ status: 200, body: { items: await s.drivers.listOffers(req.actor) } })),
 };

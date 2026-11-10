@@ -1,6 +1,6 @@
-import { DomainError } from '../domain/errors.ts';
 import type { Actor, LatLng, Trip } from '../domain/trip.ts';
 import type { Driver, DriverRepo } from '../infra/dynamo/driver-repo.ts';
+import type { ResultItem } from '../infra/dynamo/transact.ts';
 import type { Dispatch } from './dispatch.ts';
 
 export type DriverDeps = { drivers: DriverRepo; dispatch: Dispatch };
@@ -9,8 +9,9 @@ export type DriverDeps = { drivers: DriverRepo; dispatch: Dispatch };
 export type DriverView = Omit<Driver, 'geohash5'>;
 
 export interface DriverService {
-  setAvailability(actor: Actor, input: { status: 'AVAILABLE' | 'OFFLINE' }): Promise<DriverView>;
-  setPosition(actor: Actor, input: LatLng): Promise<DriverView>;
+  /** `commit(view)`, when given, is written in the same transaction as the change. */
+  setAvailability(actor: Actor, input: { status: 'AVAILABLE' | 'OFFLINE' }, commit?: ResultItem<DriverView>): Promise<DriverView>;
+  setPosition(actor: Actor, input: LatLng, commit?: ResultItem<DriverView>): Promise<DriverView>;
   /** REQUESTED trips currently offered to the driver. */
   listOffers(actor: Actor): Promise<Trip[]>;
 }
@@ -25,21 +26,15 @@ const view = (d: Driver): DriverView => ({
 
 export function createDriverService(deps: DriverDeps): DriverService {
   const { drivers, dispatch } = deps;
-
-  async function current(id: string): Promise<DriverView> {
-    const driver = await drivers.get(id);
-    if (driver === null) throw new DomainError('DRIVER_NOT_FOUND', 404, 'Driver not found');
-    return view(driver);
-  }
+  const viewCommit = (commit: ResultItem<DriverView> | undefined): ResultItem<Driver> | undefined =>
+    commit === undefined ? undefined : (driver) => commit(view(driver));
 
   return {
-    async setAvailability(actor, input) {
-      await drivers.setAvailability(actor.id, input.status);
-      return current(actor.id);
+    async setAvailability(actor, input, commit) {
+      return view(await drivers.setAvailability(actor.id, input.status, viewCommit(commit)));
     },
-    async setPosition(actor, input) {
-      await drivers.setPosition(actor.id, input);
-      return current(actor.id);
+    async setPosition(actor, input, commit) {
+      return view(await drivers.setPosition(actor.id, input, viewCommit(commit)));
     },
     listOffers(actor) {
       return dispatch.listOffers(actor.id);

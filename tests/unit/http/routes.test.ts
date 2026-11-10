@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchRoute } from '../../../src/http/routes.ts';
+import { matchRoute, ROUTES } from '../../../src/http/routes.ts';
 
 describe('matchRoute', () => {
   it('matches exact paths and extracts placeholders', () => {
@@ -16,5 +16,14 @@ describe('matchRoute', () => {
 
   it('the same path with another method does not match', () => {
     expect(matchRoute('DELETE', '/trips')).toBeNull();
+  });
+});
+
+describe('ROUTES', () => {
+  it('every mutating route accepts an Idempotency-Key (required on POST /trips); reads take none', () => {
+    for (const route of ROUTES) {
+      const expected = route.method === 'GET' ? 'none' : route.name === 'requestTrip' ? 'required' : 'optional';
+      expect(route.idempotencyKey, route.name).toBe(expected);
+    }
   });
 });

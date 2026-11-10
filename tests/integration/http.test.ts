@@ -1,3 +1,4 @@
+import { type DynamoDBDocumentClient, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -438,6 +439,77 @@ describe('cancel', () => {
     // Without the key the same request is a state conflict.
     const again = await send(api, 'POST', `/trips/${trip.id}/cancel`, { token: drv.token });
     expect(again.status).toBe(409);
+  });
+});
+
+describe('Idempotency-Key on every mutating route', () => {
+  it('accept and arrive with a key replay their response on retry instead of a state conflict', async () => {
+    const d = deps();
+    const api = createHandler(d);
+    const passenger = await person('passenger');
+    const drv = await driver(d);
+    const at = north(BOGOTA, 150);
+    await send(api, 'PUT', '/drivers/me/position', { token: drv.token, body: at });
+    await send(api, 'PUT', '/drivers/me/availability', { token: drv.token, body: { status: 'AVAILABLE' } });
+    const trip = await requestTrip(api, passenger, at);
+    expect(await d.dispatch.offerTrip(trip.id, BASE)).toContain(drv.id);
+
+    const acceptKey = { token: drv.token, headers: { 'idempotency-key': randomUUID() } };
+    const accepted = await send(api, 'POST', `/trips/${trip.id}/accept`, acceptKey);
+    expect(accepted.status).toBe(200);
+    const acceptReplay = await send(api, 'POST', `/trips/${trip.id}/accept`, acceptKey);
+    expect(acceptReplay).toMatchObject({ status: 200, body: accepted.body, headers: { 'idempotent-replayed': 'true' } });
+
+    const arriveKey = { token: drv.token, headers: { 'idempotency-key': randomUUID() } };
+    const arrived = await send(api, 'POST', `/trips/${trip.id}/arrive`, arriveKey);
+    expect(tripOf(arrived)).toMatchObject({ state: 'DRIVER_ARRIVED' });
+    const arriveReplay = await send(api, 'POST', `/trips/${trip.id}/arrive`, arriveKey);
+    expect(arriveReplay).toMatchObject({ status: 200, body: arrived.body, headers: { 'idempotent-replayed': 'true' } });
+    // The same request without a key is a state conflict.
+    expect((await send(api, 'POST', `/trips/${trip.id}/arrive`, { token: drv.token })).status).toBe(409);
+  });
+
+  it('PUT availability with a key replays the stored driver view', async () => {
+    const d = deps();
+    const api = createHandler(d);
+    const drv = await driver(d);
+    const call = { token: drv.token, headers: { 'idempotency-key': randomUUID() }, body: { status: 'AVAILABLE' } };
+    const first = await send(api, 'PUT', '/drivers/me/availability', call);
+    expect(first.body).toMatchObject({ id: drv.id, availability: 'AVAILABLE' });
+    await send(api, 'PUT', '/drivers/me/availability', { token: drv.token, body: { status: 'OFFLINE' } });
+    const replay = await send(api, 'PUT', '/drivers/me/availability', call);
+    expect(replay).toMatchObject({ status: 200, body: first.body, headers: { 'idempotent-replayed': 'true' } });
+    expect((await d.drivers.get(drv.id))?.availability).toBe('OFFLINE');
+  });
+
+  it('a reply lost after the trip commits: the retry replays the same trip and creates no second one', async () => {
+    // The first Lambda sees its TransactWriteItems commit and then fails (lost reply / crash).
+    const lostReply = {
+      send: async (cmd: unknown) => {
+        const out = await doc.send(cmd as never);
+        if (cmd instanceof TransactWriteCommand) throw new Error('socket hang up after commit');
+        return out;
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const crashed = createDeps({ doc: lostReply, table, jwtSecret: SECRET, now: () => BASE, log: () => undefined });
+    const passenger = await person('passenger');
+    const call = {
+      token: passenger.token,
+      headers: { 'idempotency-key': randomUUID() },
+      body: { origin: CALI, destination: north(CALI, 3) },
+    };
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect((await send(createHandler(crashed), 'POST', '/trips', call)).status).toBe(500);
+    } finally {
+      err.mockRestore();
+    }
+    const api = createHandler(deps());
+    const retry = await send(api, 'POST', '/trips', call);
+    expect(retry.status).toBe(201);
+    expect(retry.headers['idempotent-replayed']).toBe('true');
+    const history = await send(api, 'GET', '/me/trips', { token: passenger.token });
+    expect(history.body.items).toEqual([retry.body]);
   });
 });
 

@@ -2,6 +2,7 @@ import { DomainError } from '../domain/errors.ts';
 import { toEvent } from '../domain/events.ts';
 import { type Actor, type Trip, transition } from '../domain/trip.ts';
 import { type DriverRepo, notOffered } from '../infra/dynamo/driver-repo.ts';
+import { type ResultItem, resultItems } from '../infra/dynamo/transact.ts';
 import type { OfferState, TripRepo } from '../infra/dynamo/trip-repo.ts';
 
 /** How many nearby drivers get an offer per `offerTrip` call. */
@@ -10,7 +11,7 @@ export const OFFER_FANOUT = 5;
 /**
  * Most offers one trip can collect, enforced atomically by the offer write's condition on the trip
  * item. Keeps the retire-on-accept transaction (3 trip items + driver + one Update per offer, at
- * most 24 items) far below DynamoDB's 100-item limit.
+ * most 24 items, 25 with an Idempotency-Key completion) far below DynamoDB's 100-item limit.
  */
 export const MAX_OFFERS_PER_TRIP = 20;
 
@@ -22,15 +23,19 @@ export interface Dispatch {
    * and MAX_OFFERS_PER_TRIP in total); returns the newly offered ids, nearest first.
    */
   offerTrip(tripId: string, now?: Date): Promise<string[]>;
-  /** The driver accepts an offered trip, in ONE transaction with the driver going ON_TRIP. */
-  acceptTrip(tripId: string, driver: Actor, now: Date): Promise<Trip>;
+  /**
+   * The driver accepts an offered trip, in ONE transaction with the driver going ON_TRIP (and
+   * `commit(after)`, when given).
+   */
+  acceptTrip(tripId: string, driver: Actor, now: Date, commit?: ResultItem<Trip>): Promise<Trip>;
   /** REQUESTED trips offered to this driver, newest offer first. */
   listOffers(driverId: string): Promise<Trip[]>;
   /**
    * COMPLETE or CANCEL a trip; in the same transaction the assigned driver (if any) goes back to
-   * AVAILABLE and, when cancelling from REQUESTED, the trip's offers leave the offer index.
+   * AVAILABLE and, when cancelling from REQUESTED, the trip's offers leave the offer index (plus
+   * `commit(after)`, when given).
    */
-  finishTrip(tripId: string, action: FinishAction, actor: Actor, now: Date): Promise<Trip>;
+  finishTrip(tripId: string, action: FinishAction, actor: Actor, now: Date, commit?: ResultItem<Trip>): Promise<Trip>;
 }
 
 /** `offerTrip` re-reads and retries this many times when concurrent offer writes move `offerSeq`. */
@@ -95,7 +100,7 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): 
       throw new DomainError('CONCURRENT_UPDATE', 409, 'The trip offers changed concurrently');
     },
 
-    acceptTrip(tripId, driver, now) {
+    acceptTrip(tripId, driver, now, commit) {
       return withOfferRetry(tripId, async (before, offers) => {
         // Checked before the state machine so a driver without an offer learns nothing about the trip.
         // The transaction re-checks the offer item, so this is a fast path, not the guarantee.
@@ -108,7 +113,11 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): 
           before,
           after,
           toEvent(before, after),
-          [...drivers.retireOfferItems(tripId, offers.driverIds, driver.id), drivers.takeTripItem(driver.id)],
+          [
+            ...drivers.retireOfferItems(tripId, offers.driverIds, driver.id),
+            drivers.takeTripItem(driver.id),
+            ...resultItems(commit, after),
+          ],
           { offerSeq: offers.seq },
         );
         return after;
@@ -121,7 +130,7 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): 
       return offered.filter((t) => t.state === 'REQUESTED');
     },
 
-    finishTrip(tripId, action, actor, now) {
+    finishTrip(tripId, action, actor, now, commit) {
       return withOfferRetry(tripId, async (before, offers) => {
         const after = transition(before, action, actor, now);
         // CANCEL from REQUESTED: the offers read at this offerSeq leave the offer index, guarded on it.
@@ -132,7 +141,7 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): 
           before,
           after,
           toEvent(before, after),
-          [...retire, ...release],
+          [...retire, ...release, ...resultItems(commit, after)],
           fromRequested ? { offerSeq: offers.seq } : undefined,
         );
         return after;

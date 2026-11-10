@@ -1,13 +1,4 @@
-import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import {
-  BatchGetCommand,
-  type DynamoDBDocumentClient,
-  GetCommand,
-  QueryCommand,
-  TransactWriteCommand,
-  type TransactWriteCommandInput,
-} from '@aws-sdk/lib-dynamodb';
-import { DomainError } from '../../domain/errors.ts';
+import { BatchGetCommand, type DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { TripEvent } from '../../domain/events.ts';
 import type { Trip } from '../../domain/trip.ts';
 import {
@@ -23,32 +14,27 @@ import {
   tripGsi1,
   tripKey,
 } from './keys.ts';
+import {
+  CONCURRENT_UPDATE,
+  type Conflict,
+  type ExtraItem,
+  type TaggedItem,
+  tag,
+  tagExtra,
+  type TransactWriteItem,
+  transact,
+} from './transact.ts';
 
-/** One DocumentClient-style item of a `TransactWriteItems` call. */
-export type TransactWriteItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number];
+export type { ExtraItem, TransactWriteItem } from './transact.ts';
 
-/**
- * An extra item for `save`: either a bare transaction item (a failed condition maps to 409
- * CONCURRENT_UPDATE) or one tagged with the error to raise when ITS condition fails.
- */
-export type ExtraItem = TransactWriteItem | { item: TransactWriteItem; onConditionFailed?: DomainError };
-
-/**
- * What a failed condition on an item means for the caller. When several conditions fail in the
- * same transaction, the lowest `priority` wins (a stale trip version explains everything else).
- */
-type Conflict = { code: string; message: string; priority: number };
-
+/** Trip-level conflicts; a stale trip version explains everything else, so it ranks first. */
 const CONFLICTS = {
   staleVersion: { code: 'CONCURRENT_UPDATE', message: 'The trip was modified concurrently', priority: 0 },
   activeTrip: { code: 'ACTIVE_TRIP_EXISTS', message: 'The passenger already has an active trip', priority: 1 },
   driverBusy: { code: 'DRIVER_BUSY', message: 'The driver already has an active trip', priority: 2 },
   tripExists: { code: 'TRIP_ALREADY_EXISTS', message: 'A trip with this id already exists', priority: 3 },
-  other: { code: 'CONCURRENT_UPDATE', message: 'The trip was modified concurrently', priority: 9 },
+  other: CONCURRENT_UPDATE,
 } satisfies Record<string, Conflict>;
-
-/** Tagged extras rank after every trip-level conflict, in the order the caller passed them. */
-const TAGGED_EXTRA_PRIORITY = 10;
 
 const BATCH_GET_MAX_KEYS = 100;
 const BATCH_GET_MAX_ATTEMPTS = 5;
@@ -61,21 +47,6 @@ export type OfferState = { seq: number; driverIds: string[] };
 /** Extra condition for `save`: the trip's offer counter must still be the one that was read. */
 export type SaveGuard = { offerSeq: number };
 
-type TaggedItem = { item: TransactWriteItem; priority: number; error: () => DomainError };
-
-const tag = (item: TransactWriteItem, conflict: Conflict): TaggedItem => ({
-  item,
-  priority: conflict.priority,
-  error: () => new DomainError(conflict.code, 409, conflict.message),
-});
-
-function tagExtra(extra: ExtraItem, index: number): TaggedItem {
-  if (!('item' in extra)) return tag(extra, CONFLICTS.other);
-  const { item, onConditionFailed } = extra;
-  if (onConditionFailed === undefined) return tag(item, CONFLICTS.other);
-  return { item, priority: TAGGED_EXTRA_PRIORITY + index, error: () => onConditionFailed };
-}
-
 export class TripRepo {
   private readonly doc: DynamoDBDocumentClient;
   private readonly tableName: string;
@@ -85,15 +56,20 @@ export class TripRepo {
     this.tableName = tableName;
   }
 
-  /** Persists a new trip, reserves the passenger's single active-trip slot and writes the outbox event, atomically. */
-  async create(trip: Trip, event: TripEvent): Promise<void> {
-    await this.transact([
+  /**
+   * Persists a new trip, reserves the passenger's single active-trip slot and writes the outbox event,
+   * plus any `extraItems` (e.g. the Idempotency-Key completion), in ONE transaction. Extra items follow
+   * the same rules as in `save`.
+   */
+  async create(trip: Trip, event: TripEvent, extraItems: ExtraItem[] = []): Promise<void> {
+    await transact(this.doc, [
       tag(
         { Put: { TableName: this.tableName, Item: this.tripItem(trip), ConditionExpression: 'attribute_not_exists(PK)' } },
         CONFLICTS.tripExists,
       ),
       tag(this.putReservation('PASSENGER', trip.passengerId, trip.id), CONFLICTS.activeTrip),
       tag(this.putOutbox(event), CONFLICTS.other),
+      ...extraItems.map(tagExtra),
     ]);
   }
 
@@ -115,7 +91,7 @@ export class TripRepo {
     extraItems: ExtraItem[] = [],
     guard?: SaveGuard,
   ): Promise<void> {
-    await this.transact([...this.saveItems(before, after, event, guard), ...extraItems.map(tagExtra)]);
+    await transact(this.doc, [...this.saveItems(before, after, event, guard), ...extraItems.map(tagExtra)]);
   }
 
   /** The trip plus its offer bookkeeping, from ONE consistent read. */
@@ -255,35 +231,6 @@ export class TripRepo {
       },
     };
   }
-
-  private async transact(items: TaggedItem[]): Promise<void> {
-    try {
-      await this.doc.send(new TransactWriteCommand({ TransactItems: items.map((t) => t.item) }));
-    } catch (err) {
-      throw toDomainError(err, items) ?? err;
-    }
-  }
-}
-
-/**
- * Maps a cancelled transaction to a DomainError. `CancellationReasons[i]` describes `TransactItems[i]`;
- * the failed item with the lowest priority decides the error. A `TransactionConflict` (another
- * transaction was writing the same item) is reported as a concurrent update.
- */
-function toDomainError(err: unknown, items: TaggedItem[]): DomainError | null {
-  if (!(err instanceof TransactionCanceledException)) return null;
-  const reasons = err.CancellationReasons ?? [];
-  let winner: TaggedItem | null = null;
-  for (const [i, reason] of reasons.entries()) {
-    const tagged = items[i];
-    if (reason.Code === 'ConditionalCheckFailed' && tagged && (!winner || tagged.priority < winner.priority)) {
-      winner = tagged;
-    }
-  }
-  if (winner) return winner.error();
-  return reasons.some((r) => r.Code === 'TransactionConflict')
-    ? new DomainError(CONFLICTS.staleVersion.code, 409, CONFLICTS.staleVersion.message)
-    : null;
 }
 
 function toTrip(item: Record<string, unknown>): Trip {

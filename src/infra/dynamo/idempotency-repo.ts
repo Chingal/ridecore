@@ -3,6 +3,7 @@ import { DeleteCommand, type DynamoDBDocumentClient, GetCommand, PutCommand, Upd
 import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from '../../domain/errors.ts';
 import { idempotencyKey } from './keys.ts';
+import type { ExtraItem } from './transact.ts';
 
 export const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 /** How long a claim without a stored response blocks retries (409) before another request may take it over. */
@@ -27,10 +28,23 @@ export function hashRequest(method: string, path: string, body: unknown): string
   return createHash('sha256').update(`${method.toUpperCase()}\n${path}\n${canonical(body)}`).digest('hex');
 }
 
+/** A stored response: what `fn` returned and what a replay answers. */
+export type StoredResponse<T> = { status: number; body: T };
+
+/**
+ * Builds the transaction item that stores `{ status, body }` as this request's response, conditioned
+ * on this request still owning the claim. The caller MUST put it in the same `TransactWriteItems` as
+ * its business write, so the effect and the stored response commit (or abort) together.
+ */
+export type Complete<T> = (status: number, body: T) => ExtraItem;
+
 /**
  * Idempotency-Key store (`IDEM#<actorId>#<key>/META`, TTL 24 h). The first request claims the key
- * with a conditional put, so concurrent duplicates cannot both run `fn`; the response is stored
- * when `fn` finishes and replayed for later requests with the same hash.
+ * with a conditional put, so concurrent duplicates cannot both run `fn`. `fn` writes the response
+ * through `complete` INSIDE its own business transaction: once the business write commits, the
+ * response is stored too, so a retry after a crash replays it instead of running the operation again.
+ * If this request lost its claim (lease expired and another request took over), the owner condition
+ * fails and the whole business transaction aborts: nothing is written.
  */
 export class IdempotencyRepo {
   private readonly doc: DynamoDBDocumentClient;
@@ -48,7 +62,7 @@ export class IdempotencyRepo {
     actorId: string,
     key: string,
     requestHash: string,
-    fn: () => Promise<{ status: number; body: T }>,
+    fn: (complete: Complete<T>) => Promise<StoredResponse<T>>,
   ): Promise<IdempotentResult<T>> {
     const Key = idempotencyKey(actorId, key);
     const owner = randomUUID();
@@ -80,64 +94,74 @@ export class IdempotencyRepo {
     return Math.floor(this.now() / 1000);
   }
 
-  /** Runs `fn` under a claim this request owns, stores the response, or releases the claim on failure. */
+  /** Runs `fn` under a claim this request owns; on failure releases the claim unless a response was stored. */
   private async execute<T>(
     actorId: string,
     key: string,
     Key: { PK: string; SK: string },
     owner: string,
-    fn: () => Promise<{ status: number; body: T }>,
+    fn: (complete: Complete<T>) => Promise<StoredResponse<T>>,
   ): Promise<IdempotentResult<T>> {
-    let result: { status: number; body: T };
-    try {
-      result = await fn();
-    } catch (err) {
-      // Free the key so the client can retry. A failed cleanup must not mask the original error; it is
-      // logged, and the claim's lease expiry lets a later retry take the key over.
-      await this.doc
-        .send(
-          new DeleteCommand({
+    let used = false;
+    const complete: Complete<T> = (status, body) => {
+      used = true;
+      return {
+        item: {
+          Update: {
             TableName: this.tableName,
             Key,
+            UpdateExpression: 'SET #response = :response',
             ConditionExpression: '#owner = :me',
-            ExpressionAttributeNames: { '#owner': 'owner' },
-            ExpressionAttributeValues: { ':me': owner },
-          }),
-        )
-        .catch((cleanupErr: unknown) => {
-        if (cleanupErr instanceof ConditionalCheckFailedException) {
-          logStale(actorId, key, 'delete');
-          return;
-        }
-        console.error(
-          JSON.stringify({
-            level: 'error',
-            msg: 'idempotency_cleanup_failed',
-            actorId,
-            key,
-            error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-          }),
-        );
-      });
+            ExpressionAttributeNames: { '#response': 'response', '#owner': 'owner' },
+            ExpressionAttributeValues: { ':response': { status, body }, ':me': owner },
+          },
+        },
+        onConditionFailed: claimLost(),
+      };
+    };
+    try {
+      const result = await fn(complete);
+      if (!used) throw new Error('IdempotencyRepo.run: fn must write complete(...) in its business transaction');
+      return { ...result, replayed: false };
+    } catch (err) {
+      await this.release(actorId, key, Key, owner);
       throw err;
     }
+  }
+
+  /**
+   * Frees the key so the client can retry, unless a response is stored: when the business transaction
+   * committed but `fn` failed afterwards (e.g. the reply was lost), the stored response must survive
+   * for the retry to replay. A failed cleanup must not mask the original error; it is logged, and the
+   * claim's lease expiry lets a later retry take the key over.
+   */
+  private async release(actorId: string, key: string, Key: { PK: string; SK: string }, owner: string): Promise<void> {
     try {
       await this.doc.send(
-        new UpdateCommand({
+        new DeleteCommand({
           TableName: this.tableName,
           Key,
-          UpdateExpression: 'SET #response = :response',
-          ConditionExpression: '#owner = :me',
-          ExpressionAttributeNames: { '#response': 'response', '#owner': 'owner' },
-          ExpressionAttributeValues: { ':response': { status: result.status, body: result.body }, ':me': owner },
+          ConditionExpression: '#owner = :me AND attribute_not_exists(#response)',
+          ExpressionAttributeNames: { '#owner': 'owner', '#response': 'response' },
+          ExpressionAttributeValues: { ':me': owner },
         }),
       );
-    } catch (err) {
-      // The lease expired and another request took the key over: its outcome stands, ours is returned unstored.
-      if (!(err instanceof ConditionalCheckFailedException)) throw err;
-      logStale(actorId, key, 'response');
+    } catch (cleanupErr) {
+      if (cleanupErr instanceof ConditionalCheckFailedException) {
+        // Another request took the claim over, or this request's response is already stored.
+        console.error(JSON.stringify({ level: 'warn', msg: 'idempotency_claim_kept', actorId, key }));
+        return;
+      }
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          msg: 'idempotency_cleanup_failed',
+          actorId,
+          key,
+          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        }),
+      );
     }
-    return { ...result, replayed: false };
   }
 
   /**
@@ -177,6 +201,6 @@ export class IdempotencyRepo {
 
 const inProgress = () => new DomainError('REQUEST_IN_PROGRESS', 409, 'A request with this Idempotency-Key is still in progress');
 
-function logStale(actorId: string, key: string, op: 'delete' | 'response'): void {
-  console.error(JSON.stringify({ level: 'error', msg: 'idempotency_stale_owner', actorId, key, op }));
-}
+/** This request's claim expired and another request with the same key took it over; a retry replays that one. */
+const claimLost = () =>
+  new DomainError('REQUEST_IN_PROGRESS', 409, 'Another request with this Idempotency-Key took over; retry to get its response');

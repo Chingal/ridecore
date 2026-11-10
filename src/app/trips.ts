@@ -4,6 +4,7 @@ import { toEvent } from '../domain/events.ts';
 import { assertDistinct, estimateFare, validateLatLng } from '../domain/fare.ts';
 import { type Actor, type LatLng, type Trip, transition } from '../domain/trip.ts';
 import type { DriverRepo } from '../infra/dynamo/driver-repo.ts';
+import { type ResultItem, resultItems } from '../infra/dynamo/transact.ts';
 import type { OfferState, TripRepo } from '../infra/dynamo/trip-repo.ts';
 import type { Dispatch } from './dispatch.ts';
 
@@ -14,22 +15,27 @@ export type RequestTripInput = { origin: LatLng; destination: LatLng };
 export type CancelTripInput = TripRef & { reason?: string };
 export type RateTripInput = TripRef & { score: number; comment?: string };
 export type AdvanceAction = 'ARRIVE' | 'START' | 'COMPLETE';
+/**
+ * Optional extra item built from the resulting trip and written in the SAME transaction as the
+ * change (the HTTP layer passes the Idempotency-Key completion here). Every mutating use case takes it.
+ */
+export type TripCommit = ResultItem<Trip>;
 
 export interface TripService {
   /** A passenger requests a STANDARD trip; one active trip per passenger (409 ACTIVE_TRIP_EXISTS). */
-  requestTrip(actor: Actor, input: RequestTripInput, now: Date): Promise<Trip>;
+  requestTrip(actor: Actor, input: RequestTripInput, now: Date, commit?: TripCommit): Promise<Trip>;
   /** Readable by the owner passenger, the assigned driver or a driver holding a pending offer; else 404. */
   getTrip(actor: Actor, input: TripRef, now: Date): Promise<Trip>;
   /** The passenger's trips, newest first. */
   listMyTrips(actor: Actor, input: Record<string, never>, now: Date): Promise<Trip[]>;
   /** Owner passenger or assigned driver; frees the driver and retires offers in the same transaction. */
-  cancelTrip(actor: Actor, input: CancelTripInput, now: Date): Promise<Trip>;
+  cancelTrip(actor: Actor, input: CancelTripInput, now: Date, commit?: TripCommit): Promise<Trip>;
   /** Owner passenger, once, within 24 h of completion. */
-  rateTrip(actor: Actor, input: RateTripInput, now: Date): Promise<Trip>;
+  rateTrip(actor: Actor, input: RateTripInput, now: Date, commit?: TripCommit): Promise<Trip>;
   /** An offered driver accepts (one transaction with the driver going ON_TRIP). */
-  acceptTrip(actor: Actor, input: TripRef, now: Date): Promise<Trip>;
+  acceptTrip(actor: Actor, input: TripRef, now: Date, commit?: TripCommit): Promise<Trip>;
   /** Assigned driver: ARRIVE / START, or COMPLETE (frees the driver in the same transaction). */
-  advanceTrip(action: AdvanceAction): (actor: Actor, input: TripRef, now: Date) => Promise<Trip>;
+  advanceTrip(action: AdvanceAction): (actor: Actor, input: TripRef, now: Date, commit?: TripCommit) => Promise<Trip>;
 }
 
 const TRIP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -82,15 +88,16 @@ export function createTripService(deps: TripDeps): TripService {
     actor: Actor,
     action: 'ARRIVE' | 'START' | { type: 'RATE'; score: number; comment?: string },
     now: Date,
+    commit: TripCommit | undefined,
   ): Promise<Trip> {
     const before = await visible(tripId, actor);
     const after = transition(before, typeof action === 'string' ? { type: action } : action, actor, now);
-    await trips.save(before, after, toEvent(before, after));
+    await trips.save(before, after, toEvent(before, after), resultItems(commit, after));
     return after;
   }
 
   return {
-    async requestTrip(actor, input, now) {
+    async requestTrip(actor, input, now, commit) {
       const origin = validateLatLng(input.origin);
       const destination = validateLatLng(input.destination);
       assertDistinct(origin, destination);
@@ -107,7 +114,7 @@ export function createTripService(deps: TripDeps): TripService {
         version: 1,
         createdAt: at,
       };
-      await trips.create(trip, toEvent(null, trip));
+      await trips.create(trip, toEvent(null, trip), resultItems(commit, trip));
       return trip;
     },
 
@@ -119,22 +126,23 @@ export function createTripService(deps: TripDeps): TripService {
       return trips.history(actor.id);
     },
 
-    async cancelTrip(actor, input, now) {
+    async cancelTrip(actor, input, now, commit) {
       await visible(input.tripId, actor);
       return dispatch.finishTrip(
         input.tripId,
         input.reason === undefined ? { type: 'CANCEL' } : { type: 'CANCEL', reason: input.reason },
         actor,
         now,
+        commit,
       );
     },
 
-    rateTrip(actor, input, now) {
+    rateTrip(actor, input, now, commit) {
       const rate = { type: 'RATE' as const, score: input.score, ...(input.comment === undefined ? {} : { comment: input.comment }) };
-      return step(input.tripId, actor, rate, now);
+      return step(input.tripId, actor, rate, now, commit);
     },
 
-    async acceptTrip(actor, input, now) {
+    async acceptTrip(actor, input, now, commit) {
       if (!TRIP_ID.test(input.tripId)) throw tripNotFound();
       const found = await trips.getWithOffers(input.tripId);
       if (found === null) throw tripNotFound();
@@ -146,7 +154,7 @@ export function createTripService(deps: TripDeps): TripService {
       }
       if (trip.state !== 'REQUESTED') throw lostAccept(trip, actor, now);
       try {
-        return await dispatch.acceptTrip(trip.id, actor, now);
+        return await dispatch.acceptTrip(trip.id, actor, now, commit);
       } catch (err) {
         // The offer was there a moment ago: another driver won, or the passenger cancelled, in between.
         if (!(err instanceof DomainError && err.code === 'NOT_OFFERED')) throw err;
@@ -155,10 +163,10 @@ export function createTripService(deps: TripDeps): TripService {
     },
 
     advanceTrip(action) {
-      return async (actor, input, now) => {
-        if (action !== 'COMPLETE') return step(input.tripId, actor, action, now);
+      return async (actor, input, now, commit) => {
+        if (action !== 'COMPLETE') return step(input.tripId, actor, action, now, commit);
         await visible(input.tripId, actor);
-        return dispatch.finishTrip(input.tripId, { type: 'COMPLETE' }, actor, now);
+        return dispatch.finishTrip(input.tripId, { type: 'COMPLETE' }, actor, now, commit);
       };
     },
   };

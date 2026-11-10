@@ -21,6 +21,7 @@ export interface Route {
   path: string;
   /** Roles allowed on the route; any other role gets 403 FORBIDDEN_ROLE. Per-trip ownership is checked later (404). */
   roles: readonly Actor['role'][];
+  /** Every mutating route accepts an Idempotency-Key (POST /trips requires it); reads take none. */
   idempotencyKey: 'required' | 'optional' | 'none';
 }
 
@@ -32,13 +33,13 @@ export const ROUTES: readonly Route[] = [
   { name: 'getTrip', method: 'GET', path: '/trips/{id}', roles: BOTH, idempotencyKey: 'none' },
   { name: 'listMyTrips', method: 'GET', path: '/me/trips', roles: ['passenger'], idempotencyKey: 'none' },
   { name: 'cancelTrip', method: 'POST', path: '/trips/{id}/cancel', roles: BOTH, idempotencyKey: 'optional' },
-  { name: 'rateTrip', method: 'POST', path: '/trips/{id}/rating', roles: ['passenger'], idempotencyKey: 'none' },
-  { name: 'acceptTrip', method: 'POST', path: '/trips/{id}/accept', roles: ['driver'], idempotencyKey: 'none' },
-  { name: 'arriveTrip', method: 'POST', path: '/trips/{id}/arrive', roles: ['driver'], idempotencyKey: 'none' },
-  { name: 'startTrip', method: 'POST', path: '/trips/{id}/start', roles: ['driver'], idempotencyKey: 'none' },
-  { name: 'completeTrip', method: 'POST', path: '/trips/{id}/complete', roles: ['driver'], idempotencyKey: 'none' },
-  { name: 'setAvailability', method: 'PUT', path: '/drivers/me/availability', roles: ['driver'], idempotencyKey: 'none' },
-  { name: 'setPosition', method: 'PUT', path: '/drivers/me/position', roles: ['driver'], idempotencyKey: 'none' },
+  { name: 'rateTrip', method: 'POST', path: '/trips/{id}/rating', roles: ['passenger'], idempotencyKey: 'optional' },
+  { name: 'acceptTrip', method: 'POST', path: '/trips/{id}/accept', roles: ['driver'], idempotencyKey: 'optional' },
+  { name: 'arriveTrip', method: 'POST', path: '/trips/{id}/arrive', roles: ['driver'], idempotencyKey: 'optional' },
+  { name: 'startTrip', method: 'POST', path: '/trips/{id}/start', roles: ['driver'], idempotencyKey: 'optional' },
+  { name: 'completeTrip', method: 'POST', path: '/trips/{id}/complete', roles: ['driver'], idempotencyKey: 'optional' },
+  { name: 'setAvailability', method: 'PUT', path: '/drivers/me/availability', roles: ['driver'], idempotencyKey: 'optional' },
+  { name: 'setPosition', method: 'PUT', path: '/drivers/me/position', roles: ['driver'], idempotencyKey: 'optional' },
   { name: 'listOffers', method: 'GET', path: '/drivers/me/offers', roles: ['driver'], idempotencyKey: 'none' },
 ];
 

@@ -27,7 +27,16 @@ import {
   offerSeqGuard,
   tripKey,
 } from './keys.ts';
-import type { ExtraItem } from './trip-repo.ts';
+import {
+  CONCURRENT_UPDATE,
+  type ExtraItem,
+  type ResultItem,
+  resultItems,
+  type TaggedItem,
+  tag,
+  tagExtra,
+  transact,
+} from './transact.ts';
 
 export type Availability = 'OFFLINE' | 'AVAILABLE' | 'ON_TRIP';
 
@@ -112,18 +121,28 @@ export class DriverRepo {
     return res.Item ? toDriver(res.Item) : null;
   }
 
-  /** Goes online/offline. 404 DRIVER_NOT_FOUND for an unknown driver, 409 DRIVER_ON_TRIP while on a trip. */
-  async setAvailability(id: string, availability: 'AVAILABLE' | 'OFFLINE'): Promise<void> {
-    await this.mutate(id, (current) => {
-      if (current.availability === 'ON_TRIP') throw driverOnTrip();
-      return { availability, geohash5: current.geohash5 };
-    });
+  /**
+   * Goes online/offline and returns the driver as written. 404 DRIVER_NOT_FOUND for an unknown driver,
+   * 409 DRIVER_ON_TRIP while on a trip. `commit(driver)`, when given, is written in the same transaction.
+   */
+  async setAvailability(id: string, availability: 'AVAILABLE' | 'OFFLINE', commit?: ResultItem<Driver>): Promise<Driver> {
+    return this.mutate(
+      id,
+      (current) => {
+        if (current.availability === 'ON_TRIP') throw driverOnTrip();
+        return { availability, geohash5: current.geohash5 };
+      },
+      commit,
+    );
   }
 
-  /** Records the driver's position; while AVAILABLE the driver moves to the new cell of the index. */
-  async setPosition(id: string, p: LatLng): Promise<void> {
+  /**
+   * Records the driver's position (while AVAILABLE the driver moves to the new cell of the index) and
+   * returns the driver as written; `commit(driver)`, when given, is written in the same transaction.
+   */
+  async setPosition(id: string, p: LatLng, commit?: ResultItem<Driver>): Promise<Driver> {
     const position = validateLatLng(p);
-    await this.mutate(id, (current) => ({ availability: current.availability, geohash5: cellOf(position), position }));
+    return this.mutate(id, (current) => ({ availability: current.availability, geohash5: cellOf(position), position }), commit);
   }
 
   /**
@@ -344,11 +363,14 @@ export class DriverRepo {
    * Read-then-conditional-write of availability/position. GSI2 keys cannot be built from stored
    * attributes inside an UpdateExpression, so the next state is computed from a read and written
    * only if availability and cell are still what was read; otherwise it re-reads (a few times).
+   * With `commit`, the update and `commit(written)` go in ONE transaction; a failed condition on the
+   * driver re-reads as above, a failed condition on the commit item raises that item's error.
    */
   private async mutate(
     id: string,
     next: (current: Driver) => { availability: Availability; geohash5: string | undefined; position?: LatLng },
-  ): Promise<void> {
+    commit?: ResultItem<Driver>,
+  ): Promise<Driver> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const current = await this.get(id);
       if (current === null) throw driverNotFound();
@@ -374,23 +396,40 @@ export class DriverRepo {
         values[':seenGh'] = current.geohash5;
       }
 
+      const update = {
+        TableName: this.tableName,
+        Key: driverKey(id),
+        UpdateExpression: `SET ${set.join(', ')}${indexed ? '' : ' REMOVE GSI2PK, GSI2SK'}`,
+        ConditionExpression: condition,
+        ExpressionAttributeNames: {
+          '#availability': 'availability',
+          ...(target.position === undefined ? {} : { '#position': 'position' }),
+        },
+        ExpressionAttributeValues: values,
+      };
+      const written: Driver = {
+        ...current,
+        availability: target.availability,
+        ...(target.position === undefined || target.geohash5 === undefined
+          ? {}
+          : { position: target.position, geohash5: target.geohash5 }),
+      };
+      if (commit === undefined) {
+        try {
+          await this.doc.send(new UpdateCommand(update));
+          return written;
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        }
+        continue;
+      }
+      const items: TaggedItem[] = [tag({ Update: update }, CONCURRENT_UPDATE), ...resultItems(commit, written).map(tagExtra)];
       try {
-        await this.doc.send(
-          new UpdateCommand({
-            TableName: this.tableName,
-            Key: driverKey(id),
-            UpdateExpression: `SET ${set.join(', ')}${indexed ? '' : ' REMOVE GSI2PK, GSI2SK'}`,
-            ConditionExpression: condition,
-            ExpressionAttributeNames: {
-              '#availability': 'availability',
-              ...(target.position === undefined ? {} : { '#position': 'position' }),
-            },
-            ExpressionAttributeValues: values,
-          }),
-        );
-        return;
+        await transact(this.doc, items);
+        return written;
       } catch (err) {
-        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // The driver changed since the read: re-read and try again, as for the single update.
+        if (!(err instanceof DomainError && err.code === CONCURRENT_UPDATE.code)) throw err;
       }
     }
     throw driverChanged();
