@@ -99,4 +99,12 @@ export const offerGsi1 = (driverId: string, createdAt: string) => ({
 
 export const driverGsi1Pk = (driverId: string) => `DRIVER#${driverId}`;
 
-export const idempotencyKey = (actorId: string, key: string) => ({ PK: `IDEM#${actorId}#${key}`, SK: 'META' });
+/**
+ * Idempotency keys are scoped by role AND subject (a passenger and a driver with the same `sub` never
+ * share a key). Subject and key are URI-encoded, so neither can contain the `#` separator and
+ * `(a, b#c)` / `(a#b, c)` stay distinct.
+ */
+export const idempotencyKey = (role: string, subject: string, key: string) => ({
+  PK: `IDEM#${role}#${encodeURIComponent(subject)}#${encodeURIComponent(key)}`,
+  SK: 'META',
+});

@@ -99,7 +99,8 @@ const forbiddenRole = (role: string) => new DomainError('FORBIDDEN_ROLE', 403, `
  * The API: route -> token (401) -> role (403) -> Idempotency-Key (400) -> body (400) -> use case.
  * `source` is the dependencies or a factory called on the first request (Lambda builds them from env
  * once per container). Every response, errors included, carries `x-correlation-id`, and every request
- * logs exactly one JSON line; tokens and bodies are never logged.
+ * logs exactly one `request` JSON line (idempotency cleanup warnings use the same logger); tokens and
+ * bodies are never logged.
  */
 export function createHandler(source: Deps | (() => Deps)): ApiHandler {
   let deps: Deps | undefined = typeof source === 'function' ? undefined : source;
@@ -127,7 +128,7 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
     const prepared = ENDPOINTS[match.route.name](req, svc);
     if (key === undefined) return prepared.run();
 
-    const result = await deps.idempotency.run(actor.id, key, hashRequest(method, path, prepared.input), prepared.run);
+    const result = await deps.idempotency.run(actor, key, hashRequest(method, path, prepared.input), prepared.run);
     return {
       status: result.status,
       body: result.body,

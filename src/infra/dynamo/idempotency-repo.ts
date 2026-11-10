@@ -2,6 +2,8 @@ import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { DeleteCommand, type DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from '../../domain/errors.ts';
+import type { Actor } from '../../domain/trip.ts';
+import { jsonLog, type Logger } from '../../log.ts';
 import { idempotencyKey } from './keys.ts';
 import type { ExtraItem } from './transact.ts';
 
@@ -39,33 +41,38 @@ export type StoredResponse<T> = { status: number; body: T };
 export type Complete<T> = (status: number, body: T) => ExtraItem;
 
 /**
- * Idempotency-Key store (`IDEM#<actorId>#<key>/META`, TTL 24 h). The first request claims the key
+ * Idempotency-Key store (`IDEM#<role>#<subject>#<key>/META`, TTL 24 h), scoped per role and subject.
+ * The first request claims the key
  * with a conditional put, so concurrent duplicates cannot both run `fn`. `fn` writes the response
  * through `complete` INSIDE its own business transaction: once the business write commits, the
  * response is stored too, so a retry after a crash replays it instead of running the operation again.
  * If this request lost its claim (lease expired and another request took over), the owner condition
- * fails and the whole business transaction aborts: nothing is written.
+ * fails and the whole business transaction aborts: nothing is written. An item past its `expiresAt`
+ * counts as absent even before DynamoDB's TTL deletes it (TTL deletion is lazy).
  */
 export class IdempotencyRepo {
   private readonly doc: DynamoDBDocumentClient;
   private readonly tableName: string;
   private readonly now: () => number;
+  private readonly log: Logger;
 
-  /** `now` returns epoch milliseconds; injectable so tests need not sleep. */
-  constructor(doc: DynamoDBDocumentClient, tableName: string, now: () => number = Date.now) {
+  /** `now` returns epoch milliseconds; injectable so tests need not sleep. `log` gets cleanup warnings/errors. */
+  constructor(doc: DynamoDBDocumentClient, tableName: string, now: () => number = Date.now, log: Logger = jsonLog) {
     this.doc = doc;
     this.tableName = tableName;
     this.now = now;
+    this.log = log;
   }
 
   async run<T>(
-    actorId: string,
+    actor: Pick<Actor, 'id' | 'role'>,
     key: string,
     requestHash: string,
     fn: (complete: Complete<T>) => Promise<StoredResponse<T>>,
   ): Promise<IdempotentResult<T>> {
-    const Key = idempotencyKey(actorId, key);
+    const Key = idempotencyKey(actor.role, actor.id, key);
     const owner = randomUUID();
+    const nowSec = this.nowSeconds();
     try {
       await this.doc.send(
         new PutCommand({
@@ -76,10 +83,12 @@ export class IdempotencyRepo {
             requestHash,
             owner,
             createdAt: new Date().toISOString(),
-            expiresAt: this.nowSeconds() + IDEMPOTENCY_TTL_SECONDS,
-            leaseUntil: this.nowSeconds() + IDEMPOTENCY_LEASE_SECONDS,
+            expiresAt: nowSec + IDEMPOTENCY_TTL_SECONDS,
+            leaseUntil: nowSec + IDEMPOTENCY_LEASE_SECONDS,
           },
-          ConditionExpression: 'attribute_not_exists(PK)',
+          // An expired item (not yet removed by TTL) is overwritten like a missing one.
+          ConditionExpression: 'attribute_not_exists(PK) OR expiresAt <= :now',
+          ExpressionAttributeValues: { ':now': nowSec },
         }),
       );
     } catch (err) {
@@ -87,7 +96,7 @@ export class IdempotencyRepo {
       const taken = await this.existing<T>(Key, requestHash, owner);
       if (taken.replay !== undefined) return taken.replay;
     }
-    return this.execute(actorId, key, Key, owner, fn);
+    return this.execute(actor, key, Key, owner, fn);
   }
 
   private nowSeconds(): number {
@@ -96,7 +105,7 @@ export class IdempotencyRepo {
 
   /** Runs `fn` under a claim this request owns; on failure releases the claim unless a response was stored. */
   private async execute<T>(
-    actorId: string,
+    actor: Pick<Actor, 'id' | 'role'>,
     key: string,
     Key: { PK: string; SK: string },
     owner: string,
@@ -124,7 +133,7 @@ export class IdempotencyRepo {
       if (!used) throw new Error('IdempotencyRepo.run: fn must write complete(...) in its business transaction');
       return { ...result, replayed: false };
     } catch (err) {
-      await this.release(actorId, key, Key, owner);
+      await this.release(actor, key, Key, owner);
       throw err;
     }
   }
@@ -135,7 +144,12 @@ export class IdempotencyRepo {
    * for the retry to replay. A failed cleanup must not mask the original error; it is logged, and the
    * claim's lease expiry lets a later retry take the key over.
    */
-  private async release(actorId: string, key: string, Key: { PK: string; SK: string }, owner: string): Promise<void> {
+  private async release(
+    actor: Pick<Actor, 'id' | 'role'>,
+    key: string,
+    Key: { PK: string; SK: string },
+    owner: string,
+  ): Promise<void> {
     try {
       await this.doc.send(
         new DeleteCommand({
@@ -149,18 +163,17 @@ export class IdempotencyRepo {
     } catch (cleanupErr) {
       if (cleanupErr instanceof ConditionalCheckFailedException) {
         // Another request took the claim over, or this request's response is already stored.
-        console.error(JSON.stringify({ level: 'warn', msg: 'idempotency_claim_kept', actorId, key }));
+        this.log({ level: 'warn', msg: 'idempotency_claim_kept', role: actor.role, actorId: actor.id, key });
         return;
       }
-      console.error(
-        JSON.stringify({
-          level: 'error',
-          msg: 'idempotency_cleanup_failed',
-          actorId,
-          key,
-          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-        }),
-      );
+      this.log({
+        level: 'error',
+        msg: 'idempotency_cleanup_failed',
+        role: actor.role,
+        actorId: actor.id,
+        key,
+        error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+      });
     }
   }
 
@@ -173,12 +186,14 @@ export class IdempotencyRepo {
     const item = res.Item;
     // Item gone between the failed claim and this read (released after a failure, or TTL): the client retries.
     if (item === undefined) throw inProgress();
+    const nowSec = this.nowSeconds();
+    // Expired between the failed claim and this read: the client retries and the claim overwrites it.
+    if (typeof item.expiresAt === 'number' && item.expiresAt <= nowSec) throw inProgress();
     if (item.requestHash !== requestHash) {
       throw new DomainError('IDEMPOTENCY_KEY_REUSED', 422, 'This Idempotency-Key was used with a different request');
     }
     const response = item.response as { status: number; body: T } | undefined;
     if (response !== undefined) return { replay: { status: response.status, body: response.body, replayed: true } };
-    const nowSec = this.nowSeconds();
     if (typeof item.leaseUntil !== 'number' || item.leaseUntil >= nowSec) throw inProgress();
     try {
       await this.doc.send(

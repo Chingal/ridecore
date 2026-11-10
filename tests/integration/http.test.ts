@@ -469,6 +469,20 @@ describe('Idempotency-Key on every mutating route', () => {
     expect((await send(api, 'POST', `/trips/${trip.id}/arrive`, { token: drv.token })).status).toBe(409);
   });
 
+  it('keys are scoped by role: a driver with the passenger subject and key gets no replay of the passenger trip', async () => {
+    const api = createHandler(deps());
+    const passenger = await person('passenger');
+    const trip = await requestTrip(api, passenger, north(PASTO, 150));
+    const key = randomUUID();
+    const cancelled = await send(api, 'POST', `/trips/${trip.id}/cancel`, { token: passenger.token, headers: { 'idempotency-key': key } });
+    expect(cancelled.status).toBe(200);
+    const sameSubDriver = await signToken({ id: passenger.id, role: 'driver' }, SECRET);
+    const res = await send(api, 'POST', `/trips/${trip.id}/cancel`, { token: sameSubDriver, headers: { 'idempotency-key': key } });
+    expect(res.status).toBe(404);
+    expect(errorOf(res).code).toBe('TRIP_NOT_FOUND');
+    expect(res.headers['idempotent-replayed']).toBeUndefined();
+  });
+
   it('PUT availability with a key replays the stored driver view', async () => {
     const d = deps();
     const api = createHandler(d);
@@ -498,12 +512,7 @@ describe('Idempotency-Key on every mutating route', () => {
       headers: { 'idempotency-key': randomUUID() },
       body: { origin: CALI, destination: north(CALI, 3) },
     };
-    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    try {
-      expect((await send(createHandler(crashed), 'POST', '/trips', call)).status).toBe(500);
-    } finally {
-      err.mockRestore();
-    }
+    expect((await send(createHandler(crashed), 'POST', '/trips', call)).status).toBe(500);
     const api = createHandler(deps());
     const retry = await send(api, 'POST', '/trips', call);
     expect(retry.status).toBe(201);

@@ -6,9 +6,10 @@ import { createDocumentClient } from '../infra/dynamo/client.ts';
 import { DriverRepo } from '../infra/dynamo/driver-repo.ts';
 import { IdempotencyRepo } from '../infra/dynamo/idempotency-repo.ts';
 import { TripRepo } from '../infra/dynamo/trip-repo.ts';
+import { jsonLog, type Logger } from '../log.ts';
 
-export type LogLine = Record<string, unknown>;
-export type Logger = (line: LogLine) => void;
+export type { LogLine, Logger } from '../log.ts';
+export { jsonLog } from '../log.ts';
 
 /** Everything the HTTP layer needs. Built once per Lambda container; tests build their own. */
 export interface Deps {
@@ -30,25 +31,19 @@ export type DepsOptions = {
   log?: Logger;
 };
 
-/** One JSON line on stdout (stderr for errors), which CloudWatch keeps as a structured record. */
-export const jsonLog: Logger = (line) => {
-  const text = JSON.stringify(line);
-  if (line.level === 'error') console.error(text);
-  else console.log(text);
-};
-
 export function createDeps(opts: DepsOptions): Deps {
   const now = opts.now ?? (() => new Date());
+  const log = opts.log ?? jsonLog;
   const trips = new TripRepo(opts.doc, opts.table);
   const drivers = new DriverRepo(opts.doc, opts.table);
   return {
     trips,
     drivers,
     dispatch: createDispatch({ trips, drivers }),
-    idempotency: new IdempotencyRepo(opts.doc, opts.table, () => now().getTime()),
+    idempotency: new IdempotencyRepo(opts.doc, opts.table, () => now().getTime(), log),
     jwtSecret: opts.jwtSecret,
     now,
-    log: opts.log ?? jsonLog,
+    log,
   };
 }
 
