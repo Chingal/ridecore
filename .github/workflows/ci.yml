@@ -36,7 +36,10 @@ jobs:
           AWS_SECRET_ACCESS_KEY: test
       - name: Package the Lambda (osls)
         run: make package
-      - name: Audit dependencies
+      # Disposition of the dev-only moderate findings: docs/decisions/0002-dependency-audit.md.
+      - name: Audit production dependencies (moderate and above)
+        run: npm audit --omit=dev --audit-level=moderate
+      - name: Audit all dependencies (high and above)
         run: npm audit --audit-level=high
 
   integration:
