@@ -326,7 +326,7 @@ describe('accept race', () => {
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
     const loser = results.find((r) => r.status !== 200);
     expect(loser?.status).toBe(409);
-    expect(['CONCURRENT_UPDATE', 'TRIP_ALREADY_TAKEN']).toContain(loser === undefined ? '' : errorOf(loser).code);
+    expect(loser === undefined ? '' : errorOf(loser).code).toBe('TRIP_ALREADY_TAKEN');
   });
 
   it('an offered driver accepting after another driver committed -> 409 TRIP_ALREADY_TAKEN; a never-offered driver -> 404', async () => {

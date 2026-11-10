@@ -156,8 +156,9 @@ export function createTripService(deps: TripDeps): TripService {
       try {
         return await dispatch.acceptTrip(trip.id, actor, now, commit);
       } catch (err) {
-        // The offer was there a moment ago: another driver won, or the passenger cancelled, in between.
-        if (!(err instanceof DomainError && err.code === 'NOT_OFFERED')) throw err;
+        // The offer was there a moment ago: another driver won (their commit retired our offer, or moved
+        // the trip version under our transaction), or the passenger cancelled, in between. Re-read to say which.
+        if (!(err instanceof DomainError && (err.code === 'NOT_OFFERED' || err.code === 'CONCURRENT_UPDATE'))) throw err;
         throw lostAccept((await trips.get(trip.id)) ?? trip, actor, now);
       }
     },
