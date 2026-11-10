@@ -8,18 +8,18 @@ import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo
 
 /**
  * Full trip over real HTTP. The target is `RIDECORE_API_URL`: the Floci-deployed Lambda behind the
- * HTTP API (`make up` writes it to `.env.local`) or the local adapter (`make e2e-local`, port 3000).
+ * HTTP API (`make up` writes it to `.env.deploy`) or the local adapter (`make e2e-local`, port 3000).
  * Both share the Floci table named by `RIDECORE_TABLE`, and tokens are signed with the same dev secret.
  * Configuration comes from `scripts/load-env.ts` (Vitest e2e `setupFiles`): exported env, then
- * `.env.local`, then `.env.example`.
+ * `.env.local`, then `.env.deploy`, then `.env.example`.
  */
 function required(name: string, hint: string): string {
   const value = process.env[name];
   if (value === undefined || value === '') throw new Error(`${name} is not set: ${hint}`);
   return value;
 }
-const API = required('RIDECORE_API_URL', "run 'make up' (writes .env.local) or export it").replace(/\/$/, '');
-const TABLE = required('RIDECORE_TABLE', 'expected from .env.local or .env.example');
+const API = required('RIDECORE_API_URL', "run 'make up' (writes .env.deploy) or export it").replace(/\/$/, '');
+const TABLE = required('RIDECORE_TABLE', 'expected from .env.deploy or .env.example');
 const SECRET = required('RIDECORE_JWT_SECRET', 'expected from .env.example');
 
 const doc = createDocumentClient(createDynamoClient());
