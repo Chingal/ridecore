@@ -56,11 +56,18 @@ async function readBody(req: http.IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+/** Loopback only by default: the dev JWT secret is public, so the adapter must not be reachable from the network. */
+export const DEFAULT_HOST = '127.0.0.1';
+
 /**
- * Starts the adapter on `port` (0 picks a free one). Resolves once it is listening. By default the
- * dependencies are built from env before listening, so bad configuration stops it at startup.
+ * Starts the adapter on `host`:`port` (port 0 picks a free one). Resolves once it is listening. By
+ * default the dependencies are built from env before listening, so bad configuration stops it at startup.
  */
-export function startLocalServer(port = 3000, api: ApiHandler = createHandler(depsFromEnv())): Promise<http.Server> {
+export function startLocalServer(
+  port = 3000,
+  api: ApiHandler = createHandler(depsFromEnv()),
+  host: string = DEFAULT_HOST,
+): Promise<http.Server> {
   const server = http.createServer((req, res) => {
     readBody(req)
       .then((body) => api(toEvent(req, body)))
@@ -79,7 +86,7 @@ export function startLocalServer(port = 3000, api: ApiHandler = createHandler(de
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, () => {
+    server.listen(port, host, () => {
       server.off('error', reject);
       resolve(server);
     });
@@ -88,8 +95,10 @@ export function startLocalServer(port = 3000, api: ApiHandler = createHandler(de
 
 if (import.meta.main) {
   const port = Number(process.env.PORT ?? 3000);
-  const server = await startLocalServer(port);
-  console.log(JSON.stringify({ level: 'info', msg: 'local API listening', url: `http://localhost:${port}` }));
+  // HOST=0.0.0.0 exposes it on the network; only do that with a private RIDECORE_JWT_SECRET.
+  const host = process.env.HOST ?? DEFAULT_HOST;
+  const server = await startLocalServer(port, undefined, host);
+  console.log(JSON.stringify({ level: 'info', msg: 'local API listening', url: `http://${host}:${port}` }));
   const stop = () => server.close(() => process.exit(0));
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);

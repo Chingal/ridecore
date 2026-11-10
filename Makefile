@@ -65,7 +65,7 @@ e2e:
 # port is already taken or the server exits during startup, so it never tests someone else's server.
 e2e-local:
 	@set -e; $(LOAD_ENV); \
-	url=http://localhost:$(LOCAL_PORT); \
+	url=http://127.0.0.1:$(LOCAL_PORT); \
 	if curl -s -o /dev/null "$$url/"; then echo "Port $(LOCAL_PORT) is already in use; stop that server first" >&2; exit 1; fi; \
 	PORT=$(LOCAL_PORT) node --import ./scripts/load-env.ts src/local/server.ts & pid=$$!; \
 	trap 'kill $$pid 2>/dev/null || true' EXIT; \

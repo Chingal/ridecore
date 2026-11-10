@@ -56,6 +56,11 @@ describe('local adapter', () => {
     expect(seen[0]?.requestContext.http.method).toBe('GET');
   });
 
+  it('binds to loopback (127.0.0.1) by default', async () => {
+    await withStub();
+    expect((server?.address() as AddressInfo).address).toBe('127.0.0.1');
+  });
+
   it('answers 500 INTERNAL if the handler itself rejects', async () => {
     server = await startLocalServer(0, async () => {
       throw new Error('boom');
