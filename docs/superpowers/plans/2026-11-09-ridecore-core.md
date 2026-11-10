@@ -272,6 +272,6 @@ Answers spec §8 (a)-(e) before any product code depends on them.
 
 ## Out of this plan (next plans)
 
-- **Plan 2 — Events:** DynamoDB Streams outbox publisher → EventBridge; rules → SQS queues + DLQs; `trip.requested` consumer calls `offerTrip` and publishes the offer to SNS → `driver-offers` queue; idempotent consumers with version ordering; DLQ demo + redrive; e2e asserting events.
+- **Plan 2 — Events:** DynamoDB Streams outbox publisher → EventBridge; rules → SQS queues + DLQs; `trip.requested` consumer calls `offerTrip` and publishes the offer to SNS → `driver-offers` queue; idempotent consumers with version ordering; DLQ demo + redrive; e2e asserting events. Real time (spec §5b): spike Floci WebSocket support; API Gateway WebSocket API with JWT `$connect`, DynamoDB connections index, unicast per trip, throttled broadcast per geohash cell, driver offers, driver `position` messages, notifier Lambda fed by EventBridge; demo map page (Leaflet); e2e over a WebSocket client.
 - **Plan 3 — MCP server:** `request_trip`, `get_trip_status`, `cancel_trip`, `list_my_trips` over the HTTP API with one passenger token.
 - **Plan 4 — Docs:** README first screen, Mermaid diagram, ADRs 0002-0006, demo GIF, badges, background paragraph.

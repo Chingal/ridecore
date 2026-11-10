@@ -24,9 +24,9 @@ Success = a technical reader understands what it is, sees that it is well engine
 
 ## 3. Non-goals
 
-- Mobile apps or any frontend.
+- Mobile apps or a product frontend. The only UI is the small demo map page in §5b, used to show real-time updates.
 - Real payments (fares are calculated and recorded; nothing is charged).
-- Live maps, routing or real geolocation tracking. Positions are lat/lng values; distance is straight-line (haversine).
+- Routing, turn-by-turn navigation or map tiles of our own. Positions are lat/lng values sent by drivers; distance is straight-line (haversine).
 - Production-grade identity. Auth is a minimal, documented stand-in (see §7).
 - Deploying to a real AWS account as part of CI. (Deploy to real AWS may be documented as optional.)
 - Multi-region, high-scale load testing.
@@ -70,6 +70,20 @@ Success = a technical reader understands what it is, sees that it is well engine
 - **Observability:** structured JSON logs with a correlation id that flows from the HTTP request through the event and the consumers. A scripted demo shows a failing consumer → retries → DLQ → redrive.
 - **CI never needs secrets.** If the spike settles on Serverless Framework v4, which needs an access key to deploy, CI does not run `sls deploy`. CI then runs the handlers through the local adapter in §8, and Floci provides the AWS services. Because the adapter proves behaviour but not that the infrastructure deploys, CI also runs `cdk synth` and `serverless package` to validate the IaC; the README says plainly which parts are verified by e2e and which only by synthesis.
 
+## 5b. Real-time updates (added 2026-11-09, owner-approved; built in Plan 2)
+
+The original 2016-2018 platform pushed trip updates over socket.io: separate channels for drivers and passengers, nearby cars on the passenger's map, the assigned driver's live position sent only to that passenger, and request/accept/reject round trips. A persistent socket.io server does not fit Lambda, so ridecore uses **API Gateway WebSocket APIs + Lambda**, with a DynamoDB connections index:
+
+- **Connect** with the same JWT (passenger or driver) on `$connect`; a connection item records `connectionId`, actor, role, the current trip (if any) and, for passengers watching the map, a geohash-5 cell. `$disconnect` removes it; stale connections (`GoneException`) are deleted on send.
+- **Three delivery patterns** (the old "channels"):
+  1. **Unicast to a trip's participants**: trip state changes and the assigned driver's position go only to that trip's passenger (and state changes to its driver).
+  2. **Broadcast by map cell**: available drivers' positions go to every passenger watching that cell or its neighbours (the "cars on the map" view), throttled (at most one update per driver every few seconds).
+  3. **Unicast to a driver**: new trip offers.
+- **Driver → server** messages over the socket: `position` updates (same validation and authorization as `PUT /drivers/me/position`). Accept/arrive/start/complete stay on the HTTP API (idempotent, already tested); the socket only pushes their results.
+- Pushes are driven by the events of Plan 2 (EventBridge → a notifier Lambda), so the real-time layer never writes trip state.
+- **Demo map page** (`demo/map.html`, static, Leaflet + OpenStreetMap tiles): shows cars moving in a cell and one trip's live driver position. Demo only, not a product frontend; it reuses dev tokens and is part of the README GIF.
+- **Risk:** Floci support for API Gateway WebSocket APIs is unverified; Plan 2 starts with a spike. Fallback if Floci lacks it: run the WebSocket handlers behind a thin local `ws` adapter (as the HTTP local adapter does) and keep the Serverless config valid for real AWS, documented in an ADR.
+
 ## 6. What a reader must see in the first 2 minutes
 
 1. **README first screen**: one-sentence description; architecture diagram (Mermaid); "run it" in one command; CI and coverage badges.
@@ -105,7 +119,7 @@ Success = a technical reader understands what it is, sees that it is well engine
 
 0. Compatibility spike (§8).
 1. Core: domain and state machine, DynamoDB repository with transactions and outbox items, HTTP API, auth and authorization, idempotency keys, unit + integration tests, CI. Event contracts are defined here even if delivery comes later.
-2. Events: outbox publisher, EventBridge rules, SQS consumers, SNS dispatch, DLQs, e2e test, DLQ demo.
+2. Events and real time: outbox publisher, EventBridge rules, SQS consumers, SNS dispatch, DLQs, DLQ demo; WebSocket API (connect/auth, unicast per trip, broadcast per map cell, driver offers, driver position messages) and the demo map page; e2e tests for events and pushes.
 3. MCP server.
 4. README, ADRs, demo GIF. *(Order pending owner confirmation.)*
 
