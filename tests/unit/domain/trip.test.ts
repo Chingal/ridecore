@@ -193,6 +193,7 @@ describe('toEvent', () => {
     expect(requested.type).toBe('trip.requested');
     expect(requested.version).toBe(1);
     expect(requested.tripId).toBe('t1');
+    expect(requested.schemaVersion).toBe(1);
     for (const [action, actor, type] of steps) {
       const before = t;
       t = transition(before, action, actor, t0);

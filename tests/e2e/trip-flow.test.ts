@@ -155,5 +155,6 @@ describe(`trip flow over HTTP (${API})`, () => {
       'EVENT#000005',
       'EVENT#000006',
     ]);
+    expect((outbox.Items ?? []).every((i) => i.schemaVersion === 1)).toBe(true);
   });
 });

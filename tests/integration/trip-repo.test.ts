@@ -77,7 +77,13 @@ describe('TripRepo (DynamoDB on Floci)', () => {
 
     expect(await repo.get(trip.id)).toEqual(trip);
     const outbox = await rawItem(`TRIP#${trip.id}`, 'EVENT#000001');
-    expect(outbox).toMatchObject({ type: 'trip.requested', tripId: trip.id, version: 1, eventId: `${trip.id}:1` });
+    expect(outbox).toMatchObject({
+      schemaVersion: 1,
+      type: 'trip.requested',
+      tripId: trip.id,
+      version: 1,
+      eventId: `${trip.id}:1`,
+    });
     expect(await repo.activeTripId('PASSENGER', trip.passengerId)).toBe(trip.id);
   });
 

@@ -9,7 +9,11 @@ export type TripEventType =
   | 'trip.rated'
   | 'trip.cancelled';
 
+/** Version of the TripEvent envelope and payload; bump it on any breaking change so consumers can branch. */
+export const TRIP_EVENT_SCHEMA_VERSION = 1;
+
 export type TripEvent = {
+  schemaVersion: typeof TRIP_EVENT_SCHEMA_VERSION;
   eventId: string;
   type: TripEventType;
   tripId: string;
@@ -34,6 +38,7 @@ const EVENT_TYPE: Record<TripState, TripEventType> = {
  */
 export function toEvent(before: Trip | null, after: Trip): TripEvent {
   return {
+    schemaVersion: TRIP_EVENT_SCHEMA_VERSION,
     eventId: `${after.id}:${after.version}`,
     type: EVENT_TYPE[after.state],
     tripId: after.id,
