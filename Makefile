@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map
+.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map mcp-token
 
 # Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
 # this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
@@ -108,3 +108,8 @@ demo-map:
 	echo "WebSocket URL:   $$RIDECORE_WS_URL" && \
 	echo "Passenger token: $$(node scripts/dev-token.ts passenger passenger-1)" && \
 	node scripts/move-drivers.ts --seconds $(SECONDS)
+
+# A passenger token for the MCP server (README, "Use it from an AI agent"): export it as RIDECORE_MCP_TOKEN.
+PASSENGER ?= passenger-1
+mcp-token:
+	@$(LOAD_ENV) && node scripts/dev-token.ts passenger $(PASSENGER)

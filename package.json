@@ -17,7 +17,8 @@
     "build": "node scripts/build.ts",
     "dev": "node --import ./scripts/load-env.ts src/local/server.ts",
     "seed": "node --import ./scripts/load-env.ts scripts/seed.ts",
-    "package": "npm run build && eval \"$(node scripts/load-env.ts --print)\" && serverless package"
+    "package": "npm run build && eval \"$(node scripts/load-env.ts --print)\" && serverless package",
+    "mcp": "node --import ./scripts/load-env.ts src/mcp/main.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
