@@ -105,4 +105,4 @@ passenger cancels (no expiry or re-offer); auth is a minimal JWT stand-in, not p
 
 ## License
 
-Not yet licensed. All rights reserved until a license is added.
+[MIT](LICENSE) © 2026 Rodrigo Chingal
