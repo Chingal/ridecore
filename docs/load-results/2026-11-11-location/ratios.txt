@@ -1,0 +1,7 @@
+# node scripts/load/ratios.ts <from> <to> 200, run on 2026-11-11 right after each run.
+# Both runs on the same laptop, same Floci, minutes apart, with ridecore-location (Redis, Kafka, Go)
+# running in both: idle in "before", in use in "after". Profile peak: 100 drivers, 200 passengers.
+# before (switch off: positions in DynamoDB, map on ridecore's socket)
+{"from":"2026-11-11T23:15:17","to":"2026-11-11T23:21:36","trips":432,"offered":124,"finished":85,"billed":19}
+# after (switch on: positions and map in ridecore-location)
+{"from":"2026-11-11T23:07:57","to":"2026-11-11T23:14:18","trips":416,"offered":177,"finished":130,"billed":61}

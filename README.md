@@ -214,6 +214,17 @@ billing DLQ: 1 message(s). Move it back with: make redrive QUEUE=billing
   [real time](docs/plans/2026-11-11-ridecore-realtime.md), [MCP](docs/plans/2026-11-11-ridecore-mcp.md),
   [README and demo](docs/plans/2026-11-11-ridecore-readme.md), [load](docs/plans/2026-11-11-ridecore-load.md).
 
+## Scaling track
+
+How this system grows from thousands to millions of users, one measured decision at a time:
+
+1. **ridecore-location** (Go): driver positions, the nearby query and the live map, out of the trip
+   table, with Redis and Kafka. It is switched on with `RIDECORE_LOCATION_URL`; with the switch off,
+   ridecore runs exactly as before. Code in
+   [ridecore-location](https://github.com/Chingal/ridecore-location); before/after numbers in
+   [ADR 0008](docs/decisions/0008-scaling.md#results-change-6-built-2026-11-11).
+2. Next: making trip events recoverable (an outbox reconciler), then batch matching.
+
 ## Status and limitations
 
 Built and tested: the trip API and data model, the event path, real-time updates, the MCP server, and this
