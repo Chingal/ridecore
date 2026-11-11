@@ -190,5 +190,5 @@ describe(`trip flow over HTTP (${API})`, () => {
       'EVENT#000006',
     ]);
     expect((outbox.Items ?? []).every((i) => i.schemaVersion === 1)).toBe(true);
-  });
+  }, 150_000); // three asynchronous waits of up to 30 s each, plus the HTTP calls
 });
