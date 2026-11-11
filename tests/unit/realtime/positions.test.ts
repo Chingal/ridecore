@@ -34,10 +34,14 @@ const driverItem = (availability: string, extra: Record<string, unknown> = {}) =
 });
 
 let seq = 0;
-const record = (item: Record<string, unknown>, eventName: 'INSERT' | 'MODIFY' = 'MODIFY'): DynamoDBRecord =>
+const record = (item: Record<string, unknown>, createdAt: Date = T0): DynamoDBRecord =>
   ({
-    eventName,
-    dynamodb: { SequenceNumber: String(++seq), NewImage: marshall(item, { removeUndefinedValues: true }) },
+    eventName: 'MODIFY',
+    dynamodb: {
+      SequenceNumber: String(++seq),
+      ApproximateCreationDateTime: Math.floor(createdAt.getTime() / 1000),
+      NewImage: marshall(item, { removeUndefinedValues: true }),
+    },
   }) as unknown as DynamoDBRecord;
 const stream = (...records: DynamoDBRecord[]): DynamoDBStreamEvent => ({ Records: records });
 
@@ -135,6 +139,21 @@ describe('positions handler', () => {
         record(driverItem('AVAILABLE', { position: undefined, geohash5: undefined })),
       ),
     );
+    expect(pushed).toEqual([]);
+  });
+
+  it('ON_TRIP right after an AVAILABLE update still tells watchers the car left (car.left is never throttled)', async () => {
+    const h = handler();
+    await h(stream(record(driverItem('AVAILABLE'))));
+    now = new Date(T0.getTime() + 500);
+    await h(stream(record(driverItem('ON_TRIP'), now)));
+    expect(pushed.filter(([id, m]) => id === 'w1' && m.type === 'car.left')).toHaveLength(1);
+  });
+
+  it(`skips records older than ${30} s (a late position must not reach a later trip's passenger)`, async () => {
+    activeTrips = { d1: 't1' };
+    now = new Date(T0.getTime() + 31_000);
+    await handler()(stream(record(driverItem('ON_TRIP'), T0), record(driverItem('AVAILABLE'), T0)));
     expect(pushed).toEqual([]);
   });
 

@@ -15,6 +15,9 @@ import { createApiGatewayPusher, type Pusher, sendToActor, sendToConnections, ws
 /** At most one position push per driver in this window (ADR 0005). */
 export const POSITION_THROTTLE_MS = 3000;
 
+/** Stream records older than this are skipped: a late position is stale, and the driver may be on another trip by now. */
+export const POSITION_MAX_AGE_MS = 30_000;
+
 export type PositionsDeps = {
   connections: Pick<ConnectionRepo, 'watchersOf' | 'byActor' | 'remove'>;
   throttle: Pick<ThrottleRepo, 'once'>;
@@ -50,7 +53,9 @@ function driverOf(image: Record<string, AttributeValue> | undefined): DriverImag
  * Driver items from the table stream (a second mapping, filter `entity: DRIVER`) → map pushes:
  * - AVAILABLE with a position: `car` to passengers watching its cell or a neighbour (throttled);
  * - OFFLINE: `car.left` to those watchers;
- * - ON_TRIP: `car.left` to the watchers and `driver_position` to that trip's passenger only (throttled).
+ * - ON_TRIP: `car.left` to the watchers and `driver_position` to that trip's passenger only (each throttled
+ *   in its own scope).
+ * Records older than POSITION_MAX_AGE_MS are skipped (a stale position could reach a later trip's passenger).
  * The stream is NEW_IMAGE, so a car that moves to another cell leaves the old cell's maps by the
  * client's expiry. Nothing here writes a driver item, so it can never trigger itself. A failing push
  * reports its record and stops; the stream retries from it (positions are best effort).
@@ -71,6 +76,10 @@ export function createPositionsHandler(deps: PositionsDeps): (event: DynamoDBStr
       return;
     }
     if (driver.position === undefined || driver.cell === undefined) return;
+    // `car.left` has its own throttle scope, so a recent `car` never holds it back.
+    if (driver.availability === 'ON_TRIP' && (await deps.throttle.once('left', driver.id, at, POSITION_THROTTLE_MS))) {
+      await toWatchers(driver.cell, { type: 'car.left', schemaVersion: 1, driverId: driver.id });
+    }
     if (!(await deps.throttle.once('position', driver.id, at, POSITION_THROTTLE_MS))) return;
 
     if (driver.availability === 'AVAILABLE') {
@@ -85,7 +94,6 @@ export function createPositionsHandler(deps: PositionsDeps): (event: DynamoDBStr
       return;
     }
     if (driver.availability === 'ON_TRIP') {
-      await toWatchers(driver.cell, { type: 'car.left', schemaVersion: 1, driverId: driver.id });
       const tripId = await deps.trips.activeTripId('DRIVER', driver.id);
       const trip = tripId === null ? null : await deps.trips.get(tripId);
       if (trip === null) return;
@@ -103,6 +111,8 @@ export function createPositionsHandler(deps: PositionsDeps): (event: DynamoDBStr
     for (const record of event.Records) {
       const driver = driverOf(record.dynamodb?.NewImage as Record<string, AttributeValue> | undefined);
       if (driver === null) continue;
+      const createdAt = record.dynamodb?.ApproximateCreationDateTime;
+      if (createdAt !== undefined && now().getTime() - createdAt * 1000 > POSITION_MAX_AGE_MS) continue;
       try {
         await handle(driver);
       } catch (err) {
