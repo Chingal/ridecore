@@ -5,7 +5,7 @@ import { DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand, SQSCli
  * comes back empty) and returns how many it moved. A message is deleted from the DLQ only after
  * the send succeeded, so a crash midway duplicates at most one message, never loses one.
  *
- *   make redrive QUEUE=billing      # or dispatch / driver-offers (URLs from .env.deploy)
+ *   make redrive QUEUE=billing      # or dispatch / driver-offers / notifications (URLs from .env.deploy)
  */
 export async function redrive(sqs: Pick<SQSClient, 'send'>, dlqUrl: string, queueUrl: string): Promise<number> {
   let moved = 0;
@@ -21,7 +21,7 @@ export async function redrive(sqs: Pick<SQSClient, 'send'>, dlqUrl: string, queu
   }
 }
 
-const QUEUES = { dispatch: 'DISPATCH', billing: 'BILLING', 'driver-offers': 'DRIVER_OFFERS' } as const;
+const QUEUES = { dispatch: 'DISPATCH', billing: 'BILLING', 'driver-offers': 'DRIVER_OFFERS', notifications: 'NOTIFICATIONS' } as const;
 
 if (import.meta.main) {
   const name = process.argv[2] as keyof typeof QUEUES | undefined;
