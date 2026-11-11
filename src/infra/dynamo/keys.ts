@@ -108,3 +108,6 @@ export const idempotencyKey = (role: string, subject: string, key: string) => ({
   PK: `IDEM#${role}#${encodeURIComponent(subject)}#${encodeURIComponent(key)}`,
   SK: 'META',
 });
+
+/** Dedup record of one event handled by one consumer (ADR 0004). */
+export const consumedKey = (consumer: string, eventId: string) => ({ PK: `CONSUMED#${consumer}`, SK: `EVENT#${eventId}` });

@@ -24,6 +24,13 @@ export interface Dispatch {
    */
   offerTrip(tripId: string, now?: Date): Promise<string[]>;
   /**
+   * Offers a trip at most once, for the `trip.requested` consumer (redeliveries must not widen the
+   * fan-out). Never offered yet: offers it like `offerTrip` and returns the new ids (`fresh: true`,
+   * possibly none when no driver is near). Already offered (also by a concurrent call that won):
+   * returns the recorded offers (`fresh: false`). No longer REQUESTED: `{ driverIds: [], fresh: false }`.
+   */
+  offerTripOnce(tripId: string, now?: Date): Promise<{ driverIds: string[]; fresh: boolean }>;
+  /**
    * The driver accepts an offered trip, in ONE transaction with the driver going ON_TRIP (and
    * `commit(after)`, when given).
    */
@@ -98,6 +105,23 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): 
         }
       }
       throw new DomainError('CONCURRENT_UPDATE', 409, 'The trip offers changed concurrently');
+    },
+
+    async offerTripOnce(tripId, now = new Date()) {
+      const { trip, offers } = await load(tripId);
+      if (trip.state !== 'REQUESTED') return { driverIds: [], fresh: false };
+      if (offers.seq > 0) return { driverIds: offers.driverIds, fresh: false };
+      const ids = (await drivers.availableNear(trip.origin, OFFER_FANOUT)).map((d) => d.id);
+      if (ids.length === 0) return { driverIds: [], fresh: true };
+      try {
+        // Guarded on the never-offered counter: of two concurrent calls only one writes.
+        await drivers.putOffers(trip.id, ids, now.toISOString(), { offerSeq: 0, maxOffers: MAX_OFFERS_PER_TRIP });
+        return { driverIds: ids, fresh: true };
+      } catch (err) {
+        if (!isConcurrentUpdate(err)) throw err;
+        const after = await load(tripId);
+        return { driverIds: after.trip.state === 'REQUESTED' ? after.offers.driverIds : [], fresh: false };
+      }
     },
 
     acceptTrip(tripId, driver, now, commit) {

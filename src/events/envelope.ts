@@ -22,3 +22,15 @@ export const tripEventSchema = z.object({
   payload: z.record(z.string(), z.unknown()),
   correlationId: z.string().optional(),
 });
+
+/** One offer of a trip to one driver, as published to the driver-offers topic (raw SNS delivery). */
+export const driverOfferSchema = z.object({
+  schemaVersion: z.literal(1),
+  offerId: z.string().min(1),
+  tripId: z.string().min(1),
+  driverId: z.string().min(1),
+  offeredAt: z.string().min(1),
+  correlationId: z.string().optional(),
+});
+
+export type DriverOffer = z.infer<typeof driverOfferSchema>;
