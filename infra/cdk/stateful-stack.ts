@@ -6,7 +6,7 @@ import { Topic } from 'aws-cdk-lib/aws-sns';
 import { SqsSubscription } from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Queue } from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
-import { EVENT_BUS_NAME, EVENT_SOURCE, NOTIFICATIONS_QUEUE_NAME, OFFERS_TOPIC_NAME } from '../../src/events/names.ts';
+import { EVENT_BUS_NAME, EVENT_SOURCE, LOCATION_TRIPS_QUEUE_NAME, NOTIFICATIONS_QUEUE_NAME, OFFERS_TOPIC_NAME } from '../../src/events/names.ts';
 import { TABLE_DEFINITION, tableNameFromEnv } from '../../src/infra/dynamo/keys.ts';
 
 export interface StatefulStackProps extends StackProps {
@@ -66,6 +66,7 @@ export class StatefulStack extends Stack {
     const billing = consumerQueue('Billing', 'ridecore-billing');
     const driverOffers = consumerQueue('DriverOffers', 'ridecore-driver-offers');
     const notifications = consumerQueue('Notifications', NOTIFICATIONS_QUEUE_NAME);
+    const locationTrips = consumerQueue('LocationTrips', LOCATION_TRIPS_QUEUE_NAME);
 
     const route = (id: string, type: string, queue: Queue) =>
       new Rule(this, id, {
@@ -80,6 +81,13 @@ export class StatefulStack extends Stack {
       eventBus: bus,
       eventPattern: { source: [EVENT_SOURCE] },
       targets: [new SqsQueue(notifications)],
+    });
+
+    // ridecore-location learns trip assignments from these three events, so it never calls ridecore.
+    new Rule(this, 'TripAssignmentsToLocation', {
+      eventBus: bus,
+      eventPattern: { source: [EVENT_SOURCE], detailType: ['trip.accepted', 'trip.completed', 'trip.cancelled'] },
+      targets: [new SqsQueue(locationTrips)],
     });
 
     const offers = new Topic(this, 'OffersTopic', { topicName: OFFERS_TOPIC_NAME });

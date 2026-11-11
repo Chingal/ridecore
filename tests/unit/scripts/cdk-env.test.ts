@@ -19,6 +19,7 @@ const outputs = {
   NotificationsQueueArn: 'arn:aws:sqs:us-east-1:000000000000:ridecore-notifications',
   NotificationsQueueUrl: 'http://q/notifications',
   NotificationsDlqUrl: 'http://q/notifications-dlq',
+  LocationTripsQueueUrl: 'http://q/location-trips',
 };
 
 describe('cdkEnv', () => {
@@ -41,6 +42,7 @@ describe('cdkEnv', () => {
       RIDECORE_NOTIFICATIONS_QUEUE_ARN: outputs.NotificationsQueueArn,
       RIDECORE_NOTIFICATIONS_QUEUE_URL: 'http://q/notifications',
       RIDECORE_NOTIFICATIONS_DLQ_URL: 'http://q/notifications-dlq',
+      RIDECORE_LOCATION_TRIPS_QUEUE_URL: 'http://q/location-trips',
     });
   });
 
@@ -51,7 +53,7 @@ describe('cdkEnv', () => {
   });
 
   it('has dummy outputs for packaging without a deploy', () => {
-    expect(Object.keys(cdkEnv(DUMMY_OUTPUTS))).toHaveLength(17);
+    expect(Object.keys(cdkEnv(DUMMY_OUTPUTS))).toHaveLength(18);
   });
 });
 

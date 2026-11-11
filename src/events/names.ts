@@ -6,3 +6,5 @@ export const EVENT_BUS_NAME = 'ridecore';
 export const EVENT_SOURCE = 'ridecore.trips';
 export const OFFERS_TOPIC_NAME = 'ridecore-driver-offers';
 export const NOTIFICATIONS_QUEUE_NAME = 'ridecore-notifications';
+/** Trip assignments for ridecore-location (accepted, completed, cancelled). */
+export const LOCATION_TRIPS_QUEUE_NAME = 'ridecore-location-trips';
