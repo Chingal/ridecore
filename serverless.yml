@@ -54,12 +54,9 @@ provider:
             - sns:Publish
           Resource:
             - ${self:provider.environment.RIDECORE_OFFERS_TOPIC_ARN}
-        # Push to sockets of this API only. One role for every function (ADR 0005, Ruling 7).
-        - Effect: Allow
-          Action:
-            - execute-api:ManageConnections
-          Resource:
-            - !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebsocketsApi}/${sls:stage}/POST/@connections/*
+        # No execute-api:ManageConnections statement here: osls adds one to the shared default role for
+        # any WebSocket API in the account (`execute-api:*:*:*/@connections/*`), and a narrower statement
+        # beside it would restrict nothing. Accepted with the one-role decision (ADR 0005).
 
 package:
   individually: false

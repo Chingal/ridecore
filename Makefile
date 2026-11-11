@@ -36,9 +36,8 @@ deploy-api: build
 	api_id=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's/^ *HttpApiId: *//p'); \
 	test -n "$$api_id" || { echo "HttpApiId not found in serverless info" >&2; exit 1; }; \
 	url="http://localhost:4567/_aws/execute-api/$$api_id/\$$default"; \
-	ws_id=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's|^ *ServiceEndpointWebsocket: *wss://\([a-z0-9]*\)\..*|\1|p'); \
-	test -n "$$ws_id" || { echo "ServiceEndpointWebsocket not found in serverless info" >&2; exit 1; }; \
-	ws_url="ws://$$ws_id.execute-api.localhost.floci.io:4567/dev"; \
+	ws_url=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's|^ *ServiceEndpointWebsocket: *wss://\([a-z0-9]*\)\.[^/]*/\(.*\)$$|ws://\1.execute-api.localhost.floci.io:4567/\2|p'); \
+	test -n "$$ws_url" || { echo "ServiceEndpointWebsocket not found in serverless info" >&2; exit 1; }; \
 	{ printf '%s\n' "$$cdk_env" | sed 's/^export //'; printf "RIDECORE_API_URL='%s'\nRIDECORE_WS_URL='%s'\n" "$$url" "$$ws_url"; } > .env.deploy; \
 	curl -s -o /dev/null --max-time 30 "$$url/me/trips" || true; \
 	echo "API (Floci Lambda): $$url"; \
