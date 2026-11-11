@@ -25,3 +25,51 @@ Before building the real-time layer (Plan 2b) we checked each piece on Floci 2.4
   - otherwise (AWS): `https://<apiId>.execute-api.<region>.amazonaws.com/<stage>`.
 - **`$default` without a `connectionId` is ignored.** On Floci that is an HTTP request, not a socket message. During the spike, a handler that pushed on every `$default` triggered itself through the path-form endpoint and ran in a loop until we removed it.
 - **Start the positions mapping before seeding.** Each mapping keeps its own filter. A `LATEST` mapping skips records written while it starts, so `make up` seeds after deploying.
+
+## Context
+
+The trip API and the event path (ADR 0004) change state and deliver events, but a passenger only learns that a driver accepted by asking again. The design (spec §5b) asks for pushes: trip updates to each trip's passenger and driver, offers to drivers, and nearby cars on the passenger's map. A long-lived socket server does not fit Lambda, so the sockets live in API Gateway and Lambdas push to them.
+
+## Decision
+
+**Who owns what.** The WebSocket API and its three routes (`$connect`, `$disconnect`, `$default`) belong to osls: they are function triggers, like the HTTP API. Connections are items in the CDK table (`CONN#<id>`, TTL = 2 h 10 min, because API Gateway closes a socket after 2 h). The notifications queue and its rule are CDK resources, like every other queue. Nothing in the real-time layer writes trip state.
+
+**Connect.** The client offers the subprotocol `ridecore.v1` followed by its dev JWT, the same token as the HTTP API. `$connect` verifies the token and stores the connection with the actor (passenger or driver), or answers 401. The token is never logged.
+
+**Three delivery patterns:**
+
+| Pattern | Trigger | Recipients |
+|---|---|---|
+| Trip updates | every `trip.*` event: an EventBridge rule on the source feeds `ridecore-notifications`, consumed by the notifier | the trip's passenger, and its driver once there is one (from the event payload) |
+| Offers | the driver-offers consumer (ADR 0004), on the first delivery of an `offerId` | that driver |
+| Map | a second stream mapping on the table, filtered to driver items | `car` and `car.left` go to passengers watching the driver's geohash-5 cell or its 8 neighbours. An on-trip driver's position (`driver_position`) goes only to that trip's passenger |
+
+**Routing by actor, not by trip.** Each connection item records who is connected, not which trip it follows. Every event payload already names its passenger and driver, so nothing has to update connection items when a trip changes. The cost is one index query per recipient (GSI1, `CONNACTOR#<role>#<id>`). Passengers watching a cell are found the same way (GSI2, `WATCH#<cell>`, next to the existing `AVAIL#<cell>` keys).
+
+**Duplicates and order are the client's job.** Pushes are at-least-once and SQS does not keep order. Every trip push carries `tripId`, `version` and `eventId`, and the client keeps only the highest `version` per trip. A dedup record per push would cost a write per message to stop something harmless. The offer push is the exception: the driver-offers consumer pushes only an `offerId` it has not recorded, and records it only after the push succeeds, so a failed push is retried.
+
+**Gone sockets.** A push that gets `GoneException` (410) removes that connection item, and the message still counts as handled. Any other push error fails the SQS message or stream record, so it is retried.
+
+**The map is best effort.**
+- **Throttle.** At most one `car` or `driver_position` per driver every 3 s, held in its own item (`THROTTLE#position`), never on the driver item. A handler that wrote the driver item would trigger itself through the stream.
+- **`car.left`.** It has its own throttle scope, so a recent `car` never holds it back.
+- **Cars that change cell.** The stream image has no previous value (`NEW_IMAGE`), so a car that moves to another cell is not announced to the old cell. The client drops any car not updated for 30 s.
+- **Late records.** Stream records older than 30 s are skipped, so a late position does not reach a later trip's passenger.
+- **Failures.** The positions mapping retries 3 times and has no failure destination, because the next position replaces a lost one.
+
+**One IAM role.** All functions share osls's default role (the deferred item from ADR 0004). osls adds `execute-api:ManageConnections` on `execute-api:*:*:*/@connections/*` to that role whenever a service has a WebSocket API. So any function in the service can push to any WebSocket API in the account, and a narrower statement next to it would restrict nothing. Per-function roles need a plugin or hand-written roles. They are left for a later change and recorded here as an accepted risk.
+
+## Consequences
+
+- e2e covers the whole path on Floci:
+  - a refused bad token;
+  - a car on the map, then the offer pushed to the driver;
+  - `trip.requested` pushed to the passenger, `trip.accepted` to both;
+  - `car.left` once the driver is on the trip, then the driver's position reaching only that passenger.
+
+  With the notifier's mapping disabled, it fails.
+- `make demo-map` and `demo/map.html` show the cars moving. The page holds the pasted token in memory only.
+- **Limits:**
+  - no presence ("driver is online" is still the HTTP availability);
+  - no re-offer when nobody accepts;
+  - a record from the previous trip that arrives late, but within 30 s, can give the new trip's passenger that driver's position from a few seconds earlier (the driver item does not name its trip).
