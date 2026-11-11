@@ -6,7 +6,7 @@
 
 **Architecture:** Plan 1 already writes each state change and its `TripEvent` (outbox item, `entity: 'EVENT'`) in one DynamoDB transaction, and the table stream is on (`NEW_IMAGE`). A publisher Lambda reads the stream, keeps only outbox INSERTs and puts them on the `ridecore` EventBridge bus. Rules route `trip.requested` to the dispatch queue and `trip.completed` to the billing queue. The dispatch consumer offers the trip (existing `offerTrip` logic) and publishes one SNS message per offer; the SNS topic feeds the driver-offers queue. CDK owns every stateful resource (bus, rules, topic, subscription, queues, DLQs, queue policies); osls owns the functions and their stream/SQS triggers, reading CDK outputs one way only.
 
-**Tech Stack:** as Plan 1, plus `@aws-sdk/client-eventbridge`, `@aws-sdk/client-sns`, `@aws-sdk/client-sqs` (runtime-provided on Lambda, kept external by esbuild), `@types/aws-lambda` stream/SQS types.
+**Tech Stack:** as Plan 1, plus `@aws-sdk/client-eventbridge`, `@aws-sdk/client-sns`, `@aws-sdk/client-sqs`, `@aws-sdk/util-dynamodb` (external to the bundle only if Task 0 (g) shows the Lambda image ships them), `@types/aws-lambda` stream/SQS types.
 
 **Spec:** `docs/superpowers/specs/2026-11-09-ridecore-design.md` (§5 behaviour rules "Dispatch", "Event delivery", "Idempotency", "Observability"; §7 "Events", "Infrastructure as code"; §9 step 2). Real-time (§5b, WebSocket + demo map) is **Plan 2b**, not this plan.
 
@@ -69,10 +69,11 @@ Prove on Floci 2.4.0, with the AWS CLI in a throwaway venv as in ADR 0001, and r
 (c) DynamoDB Streams → Lambda with `FilterCriteria` on `dynamodb.NewImage.entity.S = ["EVENT"]` (record whether the filter is honoured or ignored);
 (d) SNS → SQS subscription with `RawMessageDelivery: true` delivers the raw JSON body;
 (e) EventBridge rule (created by CDK) → SQS target with a queue policy allowing `events.amazonaws.com`;
-(f) osls deploys two functions with `stream` and `sqs` events whose ARNs come from env vars.
+(f) osls deploys two functions with `stream` and `sqs` events whose ARNs come from env vars;
+(g) which `@aws-sdk/*` packages the Lambda image ships: `docker run --rm --entrypoint ls public.ecr.aws/lambda/nodejs:24 /var/runtime/node_modules/@aws-sdk` (needed: `client-eventbridge`, `client-sns`, `client-sqs`, `util-dynamodb`).
 
 - [ ] **Step 1:** Run probes (a)-(f); write the table in ADR 0004 (same format as ADR 0001).
-- [ ] **Step 2: Decision rule.** If (a) or (b) fails: Task 7 adds the local queue adapter described there, and ADR 0004 says which parts are verified only by synthesis. If (c) filter is ignored: keep it in `serverless.yml` (real AWS honours it) and rely on the in-code filter of Task 3 (always present).
+- [ ] **Step 2: Decision rule.** If (a) or (b) fails: Task 7 adds the local queue adapter described there, and ADR 0004 says which parts are verified only by synthesis. If (g) lacks any needed package: Task 7 bundles that package (remove it from esbuild `external`) and ADR 0004 says so. If (c) filter is ignored: keep it in `serverless.yml` (real AWS honours it) and rely on the in-code filter of Task 3 (always present).
 - [ ] **Step 3:** Delete `spike-events/`; commit `docs: ADR 0004 spike results for the event path`.
 
 ### Task 1: Correlation id travels into the outbox event
@@ -160,7 +161,7 @@ Prove on Floci 2.4.0, with the AWS CLI in a throwaway venv as in ADR 0001, and r
 **Files:** Modify `scripts/build.ts`, `serverless.yml`, `Makefile`, `.github/workflows/ci.yml` (only if a new step is needed), `package.json` (new SDK clients as devDependencies for types and tests).
 
 - [ ] **Step 1:** `build.ts` bundles 5 entries to `dist/`: `lambda.mjs` (API), `publisher.mjs`, `dispatch.mjs`, `driver-offers.mjs`, `billing.mjs`; `@aws-sdk/*` stays external.
-- [ ] **Step 2:** `serverless.yml`: functions `publisher` (stream event on `${env:RIDECORE_TABLE_STREAM_ARN}`, `batchSize: 10`, `startingPosition: LATEST`, `maximumRetryAttempts: 10`, `bisectBatchOnFunctionError: true`, `functionResponseType: ReportBatchItemFailures`, filter pattern of Task 0 (c)); `dispatch`, `driverOffers`, `billing` (sqs events on the CDK queue ARNs, `batchSize: 10`, `functionResponseType: ReportBatchItemFailures`); env `RIDECORE_EVENT_BUS`, `RIDECORE_OFFERS_TOPIC_ARN`; IAM adds `events:PutEvents` on the bus and `sns:Publish` on the topic (the existing DynamoDB statements already cover the consumers' transactions; osls adds the stream and SQS read permissions for the triggers). No ARN defaults in `serverless.yml`; `make package` passes dummy ARNs so CI packaging needs no deploy.
+- [ ] **Step 2:** `serverless.yml`: functions `publisher` (stream event on `${env:RIDECORE_TABLE_STREAM_ARN}`, `batchSize: 10`, `startingPosition: LATEST`, `maximumRetryAttempts: 10`, `bisectBatchOnFunctionError: true`, `functionResponseType: ReportBatchItemFailures`, `filterPatterns: [{ eventName: ['INSERT'], dynamodb: { NewImage: { entity: { S: ['EVENT'] } } } }]`); `dispatch`, `driverOffers`, `billing` (sqs events on the CDK queue ARNs, `batchSize: 10`, `functionResponseType: ReportBatchItemFailures`); env `RIDECORE_EVENT_BUS`, `RIDECORE_OFFERS_TOPIC_ARN`; IAM adds `events:PutEvents` on the bus and `sns:Publish` on the topic (the existing DynamoDB statements already cover the consumers' transactions; osls adds the stream and SQS read permissions for the triggers). No ARN defaults in `serverless.yml`; `make package` passes dummy ARNs so CI packaging needs no deploy.
 - [ ] **Step 3:** `Makefile` `deploy-api` exports every Task 2 output from `cdk-outputs.json` before `serverless deploy`; `.env.deploy` also gets the queue and DLQ URLs (for e2e and the demo).
 - [ ] **Step 4 (only if Task 0 (a) or (b) failed):** `src/local/consumers.ts` long-polls the three queues and calls the same exported handlers, deleting only acknowledged messages and leaving failed ones to SQS redrive; `make up` starts it in the background; ADR 0004 records it.
 - [ ] **Step 5:** `make down && make up` succeeds from scratch; `make e2e` still passes; commit `feat(deploy): deploy the publisher and consumers to Floci`.
@@ -172,7 +173,7 @@ Prove on Floci 2.4.0, with the AWS CLI in a throwaway venv as in ADR 0001, and r
 **Interfaces:**
 - Produces: `redrive(dlqUrl: string, queueUrl: string): Promise<number>` (receive → send body to the main queue → delete, until empty; returns moved count).
 
-- [ ] **Step 1:** e2e: remove the direct `deps.dispatch.offerTrip` call. After `POST /trips`, the driver (AVAILABLE at the origin) polls `GET /drivers/me/offers` until the trip appears (every 1 s, fail after 30 s); after `complete`, poll the billing item (`BillingRepo.get`) until `finalFare` equals the trip's `finalFare` (30 s); assert the driver-offers dedup item `CONSUMED#driver-offers / EVENT#<tripId>:<driverId>` exists.
+- [ ] **Step 1:** e2e: remove the direct `deps.dispatch.offerTrip` call. The test driver goes `AVAILABLE` with its position at the origin **before** `POST /trips` (dispatch runs asynchronously and never re-offers, ruling 2). After `POST /trips`, the driver (AVAILABLE at the origin) polls `GET /drivers/me/offers` until the trip appears (every 1 s, fail after 30 s); after `complete`, poll the billing item (`BillingRepo.get`) until `finalFare` equals the trip's `finalFare` (30 s); assert the driver-offers dedup item `CONSUMED#driver-offers / EVENT#<tripId>:<driverId>` exists.
 - [ ] **Step 2:** `scripts/dlq-demo.ts`: puts one `trip.completed` event with `schemaVersion: 99` on the bus, waits until the billing DLQ holds it (prints each receive count it sees, timeout 5 min), prints the DLQ depth; `make redrive QUEUE=billing` moves it back and prints the count. The README shows the output.
 - [ ] **Step 3:** `make e2e` and `make e2e-local` pass; `make dlq-demo` ends with `billing DLQ: 1 message`; commit `test(e2e): trip flow through events; DLQ demo and redrive`.
 
