@@ -94,6 +94,27 @@ describe('publisher handler', () => {
     expect(res).toEqual({ batchItemFailures: [{ itemIdentifier: '100' }] });
   });
 
+  it('never puts two events of the same trip in one PutEvents call, so a retry keeps per-trip order', async () => {
+    const bus = fakeBus(ok);
+    const records = [outbox('1', 'a', 1), outbox('2', 'b', 1), outbox('3', 'a', 2), outbox('4', 'a', 3), outbox('5', 'c', 1)];
+    await createPublisher({ send: bus.send, busName: BUS, log })({ Records: records });
+    const tripsPerCall = bus.calls.map((c) => c.map((e) => (JSON.parse(String(e.Detail)) as { tripId: string }).tripId));
+    expect(tripsPerCall).toEqual([['a', 'b'], ['a'], ['a', 'c']]);
+  });
+
+  it('a failed event of a trip is retried before any later event of the same trip is sent', async () => {
+    const bus = fakeBus((entries) => entries.map((e) => (String(e.Detail).includes('"a:1"') ? { ErrorCode: 'InternalFailure' } : { EventId: 'e' })));
+    const res = await createPublisher({ send: bus.send, busName: BUS, log })({ Records: [outbox('1', 'a', 1), outbox('2', 'a', 2)] });
+    expect(bus.calls.flat().map((e) => (JSON.parse(String(e.Detail)) as { eventId: string }).eventId)).toEqual(['a:1']);
+    expect(res).toEqual({ batchItemFailures: [{ itemIdentifier: '1' }] });
+  });
+
+  it('an INSERT without a new image is a configuration error, not a skip', async () => {
+    const bus = fakeBus(ok);
+    const broken: DynamoDBRecord = { eventName: 'INSERT', dynamodb: { SequenceNumber: '7' } };
+    await expect(createPublisher({ send: bus.send, busName: BUS, log })({ Records: [broken] })).rejects.toThrow(/NewImage/);
+  });
+
   it('rethrows when PutEvents itself fails (the whole batch is retried)', async () => {
     const send = () => Promise.reject(new Error('network down'));
     await expect(createPublisher({ send, busName: BUS, log })({ Records: [outbox('1', 't', 1)] })).rejects.toThrow('network down');
