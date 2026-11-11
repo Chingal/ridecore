@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map mcp-token
+.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map mcp-token coverage
 
 # Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
 # this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
@@ -113,3 +113,7 @@ demo-map:
 PASSENGER ?= passenger-1
 mcp-token:
 	@$(LOAD_ENV) && node scripts/dev-token.ts passenger $(PASSENGER)
+
+# Unit-test coverage of src/ (text summary here, coverage/coverage-summary.json for CI).
+coverage:
+	npm run coverage
