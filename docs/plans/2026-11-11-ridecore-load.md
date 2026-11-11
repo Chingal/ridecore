@@ -1,14 +1,12 @@
 # Local Load Testing Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Simulate a rush hour against the local Floci stack (many drivers moving, many passengers watching the map and requesting trips), check that the system stays **correct** under that load, find where it breaks, and write down what it means for real scale. Local and free: no AWS account, nothing deployed outside the laptop.
 
 **Architecture:** k6 (run from its official Docker image, pinned) drives HTTP and WebSocket traffic from a set of load actors created by a setup script. After each run, an invariant checker reads the table and the queues and reports anything inconsistent (stuck reservations, trips without billing, messages in DLQs). The results and the scaling analysis become `docs/load-testing.md` and ADR 0008.
 
 **Tech Stack:** k6 `2.3.0` (`grafana/k6:2.3.0`, Docker), Node 26 TypeScript scripts with the AWS SDK v3 already in the repo, Vitest.
 
-**Spec:** `docs/superpowers/specs/2026-11-09-ridecore-design.md`. The spec leaves high-scale load testing out of scope (§3: "Multi-region, high-scale load testing"). This plan stays inside that: it tests behaviour under concurrency on a laptop, not AWS capacity. The owner asked for it on 2026-11-11, limited to the local and free part.
+**Spec:** `docs/design/2026-11-09-ridecore-design.md`. The spec leaves high-scale load testing out of scope (§3: "Multi-region, high-scale load testing"). This plan stays inside that: it tests behaviour under concurrency on a laptop, not AWS capacity. The owner asked for it on 2026-11-11, limited to the local and free part.
 
 ## Global Constraints
 

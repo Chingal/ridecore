@@ -1,14 +1,12 @@
 # ridecore Real Time (Plan 2b of 4) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Push trip updates, driver offers and car positions to passengers and drivers over an API Gateway WebSocket API, driven by the Plan 2a events, plus a demo map page.
 
 **Architecture:** A WebSocket API (owned by osls) authenticates `$connect` with the existing dev JWT and stores one connection item per socket in the ridecore table. Three pushers read those items: a **notifier** consumer (new SQS queue fed by an EventBridge rule for every `trip.*` event) unicasts state changes to the trip's passenger and driver; the existing **driver-offers** consumer unicasts each new offer to the driver; a **positions** Lambda on a second table-stream mapping (driver items only) broadcasts available cars to passengers watching that geohash cell and its neighbours, and unicasts an on-trip driver's position to that trip's passenger. The real-time layer never writes trip state. `demo/map.html` (Leaflet) shows it.
 
 **Tech Stack:** as Plan 2a, plus `@aws-sdk/client-apigatewaymanagementapi` (ships in the Lambda image, ADR 0004 probe (g)), Node's global `WebSocket` client in tests and scripts, Leaflet 1.9.4 (demo page only, from cdnjs with SRI).
 
-**Spec:** `docs/superpowers/specs/2026-11-09-ridecore-design.md` §5b (real time), §5 "Authorization per resource", "Idempotency", "Observability"; §9 step 2. ADR 0004 (event path this plan builds on).
+**Spec:** `docs/design/2026-11-09-ridecore-design.md` §5b (real time), §5 "Authorization per resource", "Idempotency", "Observability"; §9 step 2. ADR 0004 (event path this plan builds on).
 
 ## Global Constraints
 

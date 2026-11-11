@@ -1,14 +1,12 @@
 # ridecore-location (Go service) Implementation Plan — Plan 6
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** A new Go repository, `ridecore-location`, that takes driver positions, answers "who is near this point?", feeds the live map from Kafka, and pushes the assigned driver's position to that trip's passenger.
 
 **Architecture:** One Go binary (`cmd/location`) with four parts: driver ingest over WebSocket (writes Redis and Kafka), the nearby query over HTTP (reads Redis), the live map (a Kafka consumer that keeps cells in memory and ticks once a second to passenger sockets), and a trip-assignment reader (SQS, fed by ridecore's EventBridge rule, writes Redis). A second binary (`cmd/replay`) rebuilds Redis from Kafka. Standard library `net/http`, no framework.
 
 **Tech Stack:** Go 1.27; `github.com/redis/go-redis/v9` v9.23.0; `github.com/twmb/franz-go` v1.22.3 (`pkg/kgo`, plus `pkg/kadm` for topic creation); `github.com/coder/websocket` v1.8.15; `github.com/golang-jwt/jwt/v5` v5.3.1; `github.com/mmcloughlin/geohash` v0.10.0; `golang.org/x/time` v0.16.0 (`rate`); `github.com/aws/aws-sdk-go-v2/service/sqs` v1.53.0; `github.com/testcontainers/testcontainers-go` v0.45.0 (redis and kafka modules); `log/slog`. Docker: `apache/kafka:4.4.0` (KRaft, single node) and Redis 8 alpine (exact stable tag pinned in Task 1 after `docker pull`).
 
-**Spec:** `docs/superpowers/specs/2026-11-11-ridecore-location-design.md` (in the ridecore repository). Plan 7 (`2026-11-11-ridecore-location-integration.md`) does the ridecore side and the measurement.
+**Spec:** `docs/design/2026-11-11-ridecore-location-design.md` (in the ridecore repository). Plan 7 (`2026-11-11-ridecore-location-integration.md`) does the ridecore side and the measurement.
 
 ## Global Constraints
 

@@ -1,14 +1,12 @@
 # ridecore ↔ ridecore-location integration and measurement — Plan 7
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** ridecore uses `ridecore-location` when `RIDECORE_LOCATION_URL` is set, `make load` can run on both paths, and the same `peak` profile is measured before and after.
 
 **Architecture:** One switch. Unset, ridecore behaves exactly as today. Set, dispatch asks the location service for the nearest 50 fresh drivers and keeps those still `AVAILABLE` in DynamoDB (one batch read); driver positions go to the location service, not to DynamoDB. Trip assignments reach the location service through a new EventBridge rule and SQS queue in the CDK stack.
 
 **Tech Stack:** Node 26 + TypeScript (existing), AWS CDK (existing), k6 `grafana/k6:2.3.0` (existing), the Go service from Plan 6.
 
-**Spec:** `docs/superpowers/specs/2026-11-11-ridecore-location-design.md`. Depends on Plan 6 (the service and its contracts in `ridecore-location/docs/contracts.md`) and on Plan 5 (merged: `make load`, the checker, `docs/load-results/2026-11-11`).
+**Spec:** `docs/design/2026-11-11-ridecore-location-design.md`. Depends on Plan 6 (the service and its contracts in `ridecore-location/docs/contracts.md`) and on Plan 5 (merged: `make load`, the checker, `docs/load-results/2026-11-11`).
 
 ## Global Constraints
 

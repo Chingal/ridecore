@@ -209,10 +209,10 @@ billing DLQ: 1 message(s). Move it back with: make redrive QUEUE=billing
   optimistic locking, and one active trip per passenger and per driver, each as one conditional transaction.
 - [ADR 0008 — Scaling](docs/decisions/0008-scaling.md): what the local load test broke first (trip events behind
   driver positions in one stream) and the changes, cheapest first.
-- [Design spec](docs/superpowers/specs/2026-11-09-ridecore-design.md) and the implementation plans:
-  [core](docs/superpowers/plans/2026-11-09-ridecore-core.md), [events](docs/superpowers/plans/2026-11-10-ridecore-events.md),
-  [real time](docs/superpowers/plans/2026-11-11-ridecore-realtime.md), [MCP](docs/superpowers/plans/2026-11-11-ridecore-mcp.md),
-  [README and demo](docs/superpowers/plans/2026-11-11-ridecore-readme.md), [load](docs/superpowers/plans/2026-11-11-ridecore-load.md).
+- [Design spec](docs/design/2026-11-09-ridecore-design.md) and the implementation plans:
+  [core](docs/plans/2026-11-09-ridecore-core.md), [events](docs/plans/2026-11-10-ridecore-events.md),
+  [real time](docs/plans/2026-11-11-ridecore-realtime.md), [MCP](docs/plans/2026-11-11-ridecore-mcp.md),
+  [README and demo](docs/plans/2026-11-11-ridecore-readme.md), [load](docs/plans/2026-11-11-ridecore-load.md).
 
 ## Status and limitations
 

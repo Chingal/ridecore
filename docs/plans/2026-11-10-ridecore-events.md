@@ -1,14 +1,12 @@
 # ridecore Events (Plan 2a of 4) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Deliver every outbox event to asynchronous consumers: DynamoDB Streams → publisher Lambda → EventBridge → SQS queues (each with a DLQ) → idempotent consumer Lambdas; dispatch offers fan out through SNS; a scripted DLQ → redrive demo.
 
 **Architecture:** Plan 1 already writes each state change and its `TripEvent` (outbox item, `entity: 'EVENT'`) in one DynamoDB transaction, and the table stream is on (`NEW_IMAGE`). A publisher Lambda reads the stream, keeps only outbox INSERTs and puts them on the `ridecore` EventBridge bus. Rules route `trip.requested` to the dispatch queue and `trip.completed` to the billing queue. The dispatch consumer offers the trip (existing `offerTrip` logic) and publishes one SNS message per offer; the SNS topic feeds the driver-offers queue. CDK owns every stateful resource (bus, rules, topic, subscription, queues, DLQs, queue policies); osls owns the functions and their stream/SQS triggers, reading CDK outputs one way only.
 
 **Tech Stack:** as Plan 1, plus `@aws-sdk/client-eventbridge`, `@aws-sdk/client-sns`, `@aws-sdk/client-sqs`, `@aws-sdk/util-dynamodb` (external to the bundle only if Task 0 (g) shows the Lambda image ships them), `@types/aws-lambda` stream/SQS types.
 
-**Spec:** `docs/superpowers/specs/2026-11-09-ridecore-design.md` (§5 behaviour rules "Dispatch", "Event delivery", "Idempotency", "Observability"; §7 "Events", "Infrastructure as code"; §9 step 2). Real-time (§5b, WebSocket + demo map) is **Plan 2b**, not this plan.
+**Spec:** `docs/design/2026-11-09-ridecore-design.md` (§5 behaviour rules "Dispatch", "Event delivery", "Idempotency", "Observability"; §7 "Events", "Infrastructure as code"; §9 step 2). Real-time (§5b, WebSocket + demo map) is **Plan 2b**, not this plan.
 
 ## Global Constraints
 
