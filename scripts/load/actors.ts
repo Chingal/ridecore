@@ -61,33 +61,63 @@ export type TeardownDeps = {
   setOffline(driverId: string): Promise<'done' | 'missing' | 'on_trip'>;
 };
 
-export type TeardownResult = { cancelled: number; completed: number; offline: number; missing: number; stuck: string[] };
+export type TeardownResult = { cancelled: number; completed: number; offline: number; missing: number; stuck: string[]; failed: string[] };
 
 /** Ends every active trip of the passengers, then sets the drivers OFFLINE. Safe to run again. */
 export async function teardownActors(ids: { drivers: string[]; passengers: string[] }, deps: TeardownDeps): Promise<TeardownResult> {
-  const result: TeardownResult = { cancelled: 0, completed: 0, offline: 0, missing: 0, stuck: [] };
-  for (const passengerId of ids.passengers) {
-    const trip = await deps.activeTrip(passengerId);
-    if (trip === null) continue;
-    // Cancelling is allowed up to DRIVER_ARRIVED; an IN_PROGRESS trip can only be completed by its driver.
-    if (trip.state === 'IN_PROGRESS' && trip.driverId !== undefined) {
-      await deps.complete(trip, trip.driverId);
-      result.completed++;
-    } else {
-      await deps.cancel(trip, passengerId);
-      result.cancelled++;
+  const result: TeardownResult = { cancelled: 0, completed: 0, offline: 0, missing: 0, stuck: [], failed: [] };
+  // One failing actor (a Lambda still acting after k6 stopped) must not leave the rest behind.
+  const attempt = async (who: string, work: () => Promise<void>) => {
+    try {
+      await work();
+    } catch (err) {
+      result.failed.push(`${who}: ${err instanceof Error ? err.message : String(err)}`);
     }
+  };
+  for (const passengerId of ids.passengers) {
+    await attempt(passengerId, async () => {
+      const trip = await deps.activeTrip(passengerId);
+      if (trip === null) return;
+      // Cancelling is allowed up to DRIVER_ARRIVED; an IN_PROGRESS trip can only be completed by its driver.
+      if (trip.state === 'IN_PROGRESS' && trip.driverId !== undefined) {
+        await deps.complete(trip, trip.driverId);
+        result.completed++;
+      } else {
+        await deps.cancel(trip, passengerId);
+        result.cancelled++;
+      }
+    });
   }
   for (const driverId of ids.drivers) {
-    const outcome = await deps.setOffline(driverId);
-    if (outcome === 'done') result.offline++;
-    else if (outcome === 'missing') result.missing++;
-    else result.stuck.push(driverId);
+    await attempt(driverId, async () => {
+      const outcome = await deps.setOffline(driverId);
+      if (outcome === 'done') result.offline++;
+      else if (outcome === 'missing') result.missing++;
+      else result.stuck.push(driverId);
+    });
   }
   return result;
 }
 
-const ACTIVE = new Set(['REQUESTED', 'ACCEPTED', 'DRIVER_ARRIVED', 'IN_PROGRESS']);
+export type SetupDeps = {
+  sign(id: string, role: 'driver' | 'passenger'): Promise<string>;
+  write(file: ActorsFile): void;
+  upsert(driver: LoadDriver, n: number): Promise<void>;
+};
+
+/**
+ * Writes the actors file (ids and tokens) first, then creates the drivers. A setup that fails
+ * halfway therefore leaves a file naming every driver it may have created, so teardown finds them.
+ */
+export async function setupActors(plan: { drivers: LoadDriver[]; passengers: LoadPassenger[] }, deps: SetupDeps): Promise<ActorsFile> {
+  const file: ActorsFile = {
+    drivers: await Promise.all(plan.drivers.map(async (d) => ({ ...d, token: await deps.sign(d.id, 'driver') }))),
+    passengers: await Promise.all(plan.passengers.map(async (p) => ({ ...p, token: await deps.sign(p.id, 'passenger') }))),
+  };
+  deps.write(file);
+  for (const [i, d] of plan.drivers.entries()) await deps.upsert(d, i + 1);
+  return file;
+}
 
 function realDeps() {
   const table = process.env.RIDECORE_TABLE;
@@ -98,27 +128,25 @@ function realDeps() {
 
 async function setup(drivers: number, passengers: number, seed: number): Promise<void> {
   const { deps, secret } = realDeps();
-  const plan = planActors(drivers, passengers, seed);
-  const file: ActorsFile = { drivers: [], passengers: [] };
-  for (const [i, d] of plan.drivers.entries()) {
-    try {
-      await deps.drivers.upsert({
-        id: d.id,
-        name: `Load driver ${i + 1}`,
-        vehicle: { plate: `LOAD${String(i + 1).padStart(3, '0')}`, model: 'Load sedan', category: 'STANDARD' },
-        availability: 'AVAILABLE',
-        position: d.position,
-      });
-    } catch (err) {
-      if (!(err instanceof DomainError && err.code === 'DRIVER_ON_TRIP')) throw err;
-      console.error(`${d.id} is on a trip: run 'make load-teardown' first`);
-      process.exit(1);
-    }
-    file.drivers.push({ ...d, token: await signToken({ id: d.id, role: 'driver' }, secret) });
-  }
-  for (const p of plan.passengers) file.passengers.push({ ...p, token: await signToken({ id: p.id, role: 'passenger' }, secret) });
   mkdirSync('.load', { recursive: true });
-  writeFileSync(ACTORS_FILE, JSON.stringify(file));
+  await setupActors(planActors(drivers, passengers, seed), {
+    sign: (id, role) => signToken({ id, role }, secret),
+    write: (file) => writeFileSync(ACTORS_FILE, JSON.stringify(file)),
+    upsert: async (d, n) => {
+      try {
+        await deps.drivers.upsert({
+          id: d.id,
+          name: `Load driver ${n}`,
+          vehicle: { plate: `LOAD${String(n).padStart(3, '0')}`, model: 'Load sedan', category: 'STANDARD' },
+          availability: 'AVAILABLE',
+          position: d.position,
+        });
+      } catch (err) {
+        if (err instanceof DomainError && err.code === 'DRIVER_ON_TRIP') throw new Error(`${d.id} is on a trip: run 'make load-teardown' first`, { cause: err });
+        throw err;
+      }
+    },
+  });
   console.log(`load setup: ${drivers} drivers AVAILABLE and ${passengers} passengers around (${LOAD_CENTRE.lat}, ${LOAD_CENTRE.lng}); tokens in ${ACTORS_FILE}`);
 }
 
@@ -133,7 +161,11 @@ async function teardown(): Promise<void> {
       })()
     : { drivers: range('load-driver-'), passengers: range('load-passenger-') };
   const result = await teardownActors(ids, {
-    activeTrip: async (passengerId) => (await deps.trips.history(passengerId)).find((t) => ACTIVE.has(t.state)) ?? null,
+    // The reservation item is the source of truth for "active" (consistent read), not the history index.
+    activeTrip: async (passengerId) => {
+      const tripId = await deps.trips.activeTripId('PASSENGER', passengerId);
+      return tripId === null ? null : deps.trips.get(tripId);
+    },
     cancel: async (trip, passengerId) => {
       await deps.dispatch.finishTrip(trip.id, { type: 'CANCEL', reason: 'load teardown' }, { id: passengerId, role: 'passenger' }, now());
     },
@@ -153,16 +185,22 @@ async function teardown(): Promise<void> {
   });
   console.log(
     `load teardown: ${result.cancelled} trips cancelled, ${result.completed} completed, ${result.offline} drivers OFFLINE` +
-      (result.stuck.length > 0 ? `; still ON_TRIP: ${result.stuck.join(', ')}` : ''),
+      (result.stuck.length > 0 ? `; still ON_TRIP: ${result.stuck.join(', ')}` : '') +
+      (result.failed.length > 0 ? `; failed: ${result.failed.join('; ')}` : ''),
   );
-  if (result.stuck.length > 0) process.exit(1);
+  if (result.stuck.length > 0 || result.failed.length > 0) process.exit(1);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [command, a, b, c] = process.argv.slice(2);
-  if (command === 'setup') await setup(Number(a ?? 20), Number(b ?? 40), Number(c ?? 1));
-  else if (command === 'teardown') await teardown();
-  else {
+  try {
+    if (command === 'setup') await setup(Number(a ?? 20), Number(b ?? 40), Number(c ?? 1));
+    else if (command === 'teardown') await teardown();
+  } catch (err) {
+    console.error(`load ${command}: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  if (command !== 'setup' && command !== 'teardown') {
     console.error('Usage: node scripts/load/actors.ts setup <drivers> <passengers> [seed] | teardown');
     process.exit(1);
   }

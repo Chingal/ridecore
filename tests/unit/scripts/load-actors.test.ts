@@ -4,7 +4,7 @@ import type { Trip, TripState } from '../../../src/domain/trip.ts';
 import { haversineKm } from '../../../src/domain/fare.ts';
 import { cellOf } from '../../../src/infra/dynamo/driver-repo.ts';
 import { DEMO_CENTRE } from '../../../scripts/demo-drivers.ts';
-import { LOAD_CENTRE, planActors, teardownActors, type TeardownDeps } from '../../../scripts/load/actors.ts';
+import { LOAD_CENTRE, planActors, setupActors, teardownActors, type TeardownDeps } from '../../../scripts/load/actors.ts';
 
 const block = (cell: string) => new Set([cell, ...ngeohash.neighbors(cell)]);
 
@@ -74,9 +74,42 @@ describe('teardownActors', () => {
       'offline load-driver-1',
       'offline load-driver-2',
     ]);
-    expect(first).toEqual({ cancelled: 2, completed: 1, offline: 2, missing: 1, stuck: [] });
+    expect(first).toEqual({ cancelled: 2, completed: 1, offline: 2, missing: 1, stuck: [], failed: [] });
     calls.length = 0;
-    expect(await teardownActors(ids, deps)).toEqual({ cancelled: 0, completed: 0, offline: 2, missing: 1, stuck: [] });
+    expect(await teardownActors(ids, deps)).toEqual({ cancelled: 0, completed: 0, offline: 2, missing: 1, stuck: [], failed: [] });
     expect(calls).toEqual([]);
+  });
+
+  it('keeps going when one actor fails, and lists the failure', async () => {
+    const { deps, calls } = fakes({
+      'load-passenger-1': { id: 't1', state: 'REQUESTED' },
+      'load-passenger-2': { id: 't2', state: 'ACCEPTED', driverId: 'load-driver-1' },
+    });
+    const cancel = deps.cancel;
+    deps.cancel = async (trip, passengerId) => {
+      if (trip.id === 't1') throw new Error('409 CONCURRENT_UPDATE');
+      return cancel(trip, passengerId);
+    };
+    const result = await teardownActors({ drivers: ['load-driver-1', 'load-driver-2'], passengers: ['load-passenger-1', 'load-passenger-2'] }, deps);
+    expect(calls).toEqual(['cancel t2 by load-passenger-2', 'offline load-driver-1', 'offline load-driver-2']);
+    expect(result.failed).toEqual(['load-passenger-1: 409 CONCURRENT_UPDATE']);
+  });
+});
+
+describe('setupActors', () => {
+  it('writes the actors file before creating any driver, so a setup that fails halfway is still torn down', async () => {
+    const events: string[] = [];
+    const plan = planActors(4, 2, 1);
+    await expect(
+      setupActors(plan, {
+        sign: async (id) => `token-of-${id}`,
+        write: (file) => void events.push(`write ${file.drivers.length} drivers ${file.passengers.length} passengers`),
+        upsert: async (d) => {
+          if (d.id === 'load-driver-3') throw new Error('Floci timeout');
+          events.push(`upsert ${d.id}`);
+        },
+      }),
+    ).rejects.toThrow('Floci timeout');
+    expect(events).toEqual(['write 4 drivers 2 passengers', 'upsert load-driver-1', 'upsert load-driver-2']);
   });
 });

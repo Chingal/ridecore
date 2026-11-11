@@ -47,6 +47,16 @@ describe('evaluate', () => {
     expect(v).toContain('active trip t-active has no DRIVER reservation for load-driver-1');
   });
 
+  it("1b. a reservation that points to someone else's trip", () => {
+    const s = clean();
+    s.reservations[1] = { kind: 'PASSENGER', id: 'load-passenger-2', tripId: 't-active' };
+    s.reservations[3] = { kind: 'DRIVER', id: 'load-driver-2', tripId: 't-active' };
+    expect(evaluate(s)).toEqual([
+      'reservation PASSENGER#load-passenger-2 points to trip t-active of load-passenger-1',
+      'reservation DRIVER#load-driver-2 points to trip t-active of load-driver-1',
+    ]);
+  });
+
   it('2. a completed or rated trip without a billing record', () => {
     const s = clean();
     s.billed = new Set();
@@ -84,5 +94,8 @@ describe('exitCode', () => {
     expect(exitCode({ read: { trips: 3, drivers: 2, queues: 8 }, violations: [] })).toBe(0);
     expect(exitCode({ read: { trips: 3, drivers: 2, queues: 8 }, violations: ['x'] })).toBe(1);
     expect(exitCode({ read: { trips: 0, drivers: 2, queues: 8 }, violations: [] })).toBe(1);
+    // Missing queue settings or drivers mean part of the check never ran.
+    expect(exitCode({ read: { trips: 3, drivers: 2, queues: 0 }, violations: [] })).toBe(1);
+    expect(exitCode({ read: { trips: 3, drivers: 0, queues: 8 }, violations: [] })).toBe(1);
   });
 });

@@ -1,0 +1,3 @@
+peak cpu_max 104% mem 243.7-444.6 MiB n=34
+spike cpu_max 94% mem 162.6-448 MiB n=12
+crowded cpu_max 183% mem 234.1-328.3 MiB n=13

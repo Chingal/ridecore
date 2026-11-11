@@ -8,12 +8,12 @@ The design spec leaves high-scale load testing out of scope (§3). Plan 5 still 
 
 ## Findings
 
-**1. Trip events share the table stream with driver positions.** This was measured.
+**1. Trip events share the table stream with driver positions.** This was measured on Floci.
 - Every position is a write to the driver item, so it is also a stream record.
-- The publisher's mapping filters those out, but it still has to read them: most batches it gets carry 1 useful record out of 10.
-- At 100 drivers, about 33 position writes per second, Floci's bounded stream trimmed records the publisher had not read yet.
-- Result in `peak`: only 19 % of trips got an offer, and 21 % of completed trips got billed. The trips themselves stayed consistent.
-- On AWS the stream keeps 24 hours, so this is lag (`IteratorAge`) rather than loss. Offers and fares would arrive late. Both effects have the same cause: delivery of trip events depends on position traffic.
+- The publisher's mapping filters those out, but it still has to read them: almost every batch carries 1 useful record out of 10.
+- At 100 drivers, about 33 position writes per second, Floci's bounded stream trimmed records the publisher had not read yet. It logged this about once a second.
+- Result in `peak`: only 23 % of trips got an offer, and 22 % of finished trips got billed. The trips themselves stayed consistent. One unbilled trip was traced end to end. That the missing offers had the same cause is inferred.
+- On AWS the stream keeps records for 24 hours, so the expected symptom is lag (`IteratorAge`) rather than loss. That is a hypothesis this laptop cannot measure. Either way, delivery of trip events depends on position traffic.
 
 **2. The map fan-out grows as drivers × watchers.** This comes from the code.
 - One position triggers a query of 9 cells for watchers, then one `PostToConnection` per watcher.
@@ -24,7 +24,7 @@ The design spec leaves high-scale load testing out of scope (§3). Plan 5 still 
 
 **4. One concurrency pool for every function.** This comes from the code and the account defaults. Lambda concurrency is shared per region (1,000 by default), and every WebSocket message is one invocation. Map traffic can therefore starve the trip API and dispatch.
 
-**5. No re-offer.** This comes from the code. An unaccepted trip waits until the passenger cancels. In `peak`, 332 riders gave up after 60 s. Most of those trips had lost their `trip.requested` event (finding 1), but under real demand the same happens whenever the five nearest drivers decline or are busy.
+**5. No re-offer.** This comes from the code. An unaccepted trip waits until the passenger cancels. In `peak`, 332 riders gave up after 60 s. Many of those trips probably lost their `trip.requested` event (finding 1, inferred), but under real demand the same happens whenever the five nearest drivers decline or are busy.
 
 ## Decision: changes, cheapest first
 

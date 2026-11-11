@@ -9,6 +9,11 @@ import { createDynamoClient } from '../../src/infra/dynamo/client.ts';
  * answering, it says so: that is the laptop's limit, not a ridecore result.
  */
 const K6_IMAGE = 'grafana/k6:2.3.0';
+const K6_CONTAINER = 'ridecore-load-k6';
+
+// Ctrl-C reaches the child (same process group) and stops it; this process must outlive it so the
+// `finally` below still tears the actors down.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => console.error(`load: ${signal} received, stopping k6 and tearing down`));
 const profileName = process.argv[2] ?? 'smoke';
 const profiles = JSON.parse(readFileSync('load/profiles.json', 'utf8')) as Record<string, { drivers: number; passengers: number }>;
 const profile = profiles[profileName];
@@ -49,14 +54,17 @@ try {
     const uid = `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`;
     const k6 = spawnSync(
       'docker',
-      ['run', '--rm', '--user', uid, '--network', 'host', '-v', `${process.cwd()}/load:/load:ro`, '-v', `${process.cwd()}/.load:/data`,
+      ['run', '--rm', '--name', K6_CONTAINER, '--user', uid, '--network', 'host', '-v', `${process.cwd()}/load:/load:ro`, '-v', `${process.cwd()}/.load:/data`,
         K6_IMAGE, 'run', '--quiet', '-e', `API=${process.env.RIDECORE_API_URL}`, '-e', `WS=${process.env.RIDECORE_WS_URL}`, '-e', `PROFILE=${profileName}`, '/load/rush-hour.js'],
       { stdio: 'inherit' },
     );
-    if (step('k6', k6.status ?? 1)) step('invariant check', node('scripts/load/check.ts'));
-    else if (!(await flociAnswers())) console.error('load: Floci is not answering. This is the laptop/emulator limit, not a ridecore result.');
+    step('k6', k6.status ?? 1);
+    // Check even after k6 aborted (a threshold crossed): that is the run most likely to break something.
+    if (await flociAnswers()) step('invariant check', node('scripts/load/check.ts'));
+    else console.error('load: Floci is not answering. This is the laptop/emulator limit, not a ridecore result.');
   }
 } finally {
+  spawnSync('docker', ['rm', '--force', K6_CONTAINER], { stdio: 'ignore' });
   if (!(await flociAnswers())) console.error('load: Floci is not answering; teardown will likely fail. Run `make load-teardown` once it is back.');
   step('teardown', node('scripts/load/actors.ts', 'teardown'));
 }
