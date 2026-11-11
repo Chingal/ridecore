@@ -142,6 +142,14 @@ describe('dispatch.offerTripOnce (DynamoDB on Floci)', () => {
 });
 
 describe('ConsumedRepo (DynamoDB on Floci)', () => {
+  it('has() is false before markOnce and true after, per consumer', async () => {
+    const eventId = `e-${randomUUID()}`;
+    expect(await consumed.has('driver-offers', eventId)).toBe(false);
+    await consumed.markOnce('driver-offers', eventId, BASE);
+    expect(await consumed.has('driver-offers', eventId)).toBe(true);
+    expect(await consumed.has('billing', eventId)).toBe(false);
+  });
+
   it('markOnce is true the first time and false for the same consumer and event afterwards', async () => {
     const eventId = `${randomUUID()}:1`;
     expect(await consumed.markOnce('driver-offers', eventId, BASE)).toBe(true);
