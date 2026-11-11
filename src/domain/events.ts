@@ -20,6 +20,8 @@ export type TripEvent = {
   version: number;
   occurredAt: string;
   payload: Record<string, unknown>;
+  /** Correlation id of the request that caused the change (added by the outbox writer when known). */
+  correlationId?: string;
 };
 
 const EVENT_TYPE: Record<TripState, TripEventType> = {

@@ -17,6 +17,9 @@ provider:
     # No default: package and deploy fail when it is unset. Local and CI load the non-secret dev
     # value from .env.example (Makefile); a real stage resolves it from SSM or Secrets Manager.
     RIDECORE_JWT_SECRET: ${env:RIDECORE_JWT_SECRET}
+    # Event path (ADR 0004): names and ARNs from the CDK outputs, exported by the Makefile. No defaults.
+    RIDECORE_EVENT_BUS: ${env:RIDECORE_EVENT_BUS}
+    RIDECORE_OFFERS_TOPIC_ARN: ${env:RIDECORE_OFFERS_TOPIC_ARN}
   iam:
     role:
       statements:
@@ -32,12 +35,27 @@ provider:
           Resource:
             - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:provider.environment.RIDECORE_TABLE}
             - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${self:provider.environment.RIDECORE_TABLE}/index/*
+        - Effect: Allow
+          Action:
+            - events:PutEvents
+          Resource:
+            - !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${self:provider.environment.RIDECORE_EVENT_BUS}
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+          Resource:
+            - ${env:RIDECORE_PUBLISHER_FAILURES_QUEUE_ARN}
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource:
+            - ${self:provider.environment.RIDECORE_OFFERS_TOPIC_ARN}
 
 package:
   individually: false
   patterns:
     - '!**'
-    - dist/lambda.mjs
+    - dist/*.mjs
 
 functions:
   api:
@@ -45,3 +63,54 @@ functions:
     handler: dist/lambda.handler
     events:
       - httpApi: '*'
+
+  # Outbox publisher (ADR 0004): table stream -> EventBridge. The filter keeps only outbox INSERTs;
+  # the code filters again, so a mapping without the filter still publishes only events.
+  publisher:
+    handler: dist/publisher.handler
+    events:
+      - stream:
+          type: dynamodb
+          arn: ${env:RIDECORE_TABLE_STREAM_ARN}
+          batchSize: 10
+          startingPosition: LATEST
+          maximumRetryAttempts: 10
+          bisectBatchOnFunctionError: true
+          functionResponseType: ReportBatchItemFailures
+          # After the retries, the failed records' location goes to this CDK queue instead of being
+          # dropped silently (ADR 0004): an outbox event is never lost without a trace.
+          destinations:
+            onFailure:
+              arn: ${env:RIDECORE_PUBLISHER_FAILURES_QUEUE_ARN}
+              type: sqs
+          filterPatterns:
+            - eventName: [INSERT]
+              dynamodb:
+                NewImage:
+                  entity:
+                    S: [EVENT]
+
+  # SQS consumers; each queue and its DLQ belong to the CDK stack (3 receives, then the DLQ).
+  dispatch:
+    handler: dist/dispatch.handler
+    events:
+      - sqs:
+          arn: ${env:RIDECORE_DISPATCH_QUEUE_ARN}
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+
+  driverOffers:
+    handler: dist/driver-offers.handler
+    events:
+      - sqs:
+          arn: ${env:RIDECORE_DRIVER_OFFERS_QUEUE_ARN}
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+
+  billing:
+    handler: dist/billing.handler
+    events:
+      - sqs:
+          arn: ${env:RIDECORE_BILLING_QUEUE_ARN}
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures

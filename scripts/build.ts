@@ -1,14 +1,26 @@
+import { rmSync } from 'node:fs';
 import { build } from 'esbuild';
 
+// Start from an empty dist/ so a removed entry never ships as a stale bundle.
+rmSync('dist', { recursive: true, force: true });
+
 /**
- * Bundles the API Lambda entry (`src/http/lambda.ts`) into one ESM file for the `nodejs24.x` runtime.
+ * Bundles each Lambda entry (the API, the outbox publisher and the three SQS consumers) into one ESM
+ * file per function in `dist/`, for the `nodejs24.x` runtime.
  * The AWS SDK v3 stays external: the Lambda runtime ships it (checked on Floci's
- * `public.ecr.aws/lambda/nodejs:24` image, which has `@aws-sdk/client-dynamodb` and `lib-dynamodb`).
+ * `public.ecr.aws/lambda/nodejs:24` image, ADR 0001 and ADR 0004 probe (g)).
  * The banner gives bundled CommonJS dependencies a `require` for Node built-ins.
  */
 await build({
-  entryPoints: ['src/http/lambda.ts'],
-  outfile: 'dist/lambda.mjs',
+  entryPoints: {
+    lambda: 'src/http/lambda.ts',
+    publisher: 'src/events/publisher.ts',
+    dispatch: 'src/events/consumers/dispatch.ts',
+    'driver-offers': 'src/events/consumers/driver-offers.ts',
+    billing: 'src/events/consumers/billing.ts',
+  },
+  outdir: 'dist',
+  outExtension: { '.js': '.mjs' },
   bundle: true,
   platform: 'node',
   format: 'esm',

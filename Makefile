@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint
+.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive
 
 # Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
 # this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
@@ -25,18 +25,18 @@ deploy-stateful:
 	$(FLOCI_ENV) npx cdk bootstrap aws://000000000000/us-east-1
 	$(FLOCI_ENV) npx cdk deploy RidecoreStateful --require-approval never --outputs-file cdk-outputs.json
 
-# One-way link: the table name comes from the CDK output; osls never feeds anything back to CDK.
-# The JWT secret comes from the env policy (dev value in .env.example; no default in serverless.yml).
-# Writes the generated .env.deploy with RIDECORE_TABLE and RIDECORE_API_URL (Floci's HTTP API path for
-# the stack); .env.local holds the user's own settings and is never touched.
+# One-way link: table, stream, bus, topic and queues come from the CDK outputs (scripts/cdk-env.ts);
+# osls never feeds anything back to CDK. The JWT secret comes from the env policy (dev value in
+# .env.example; no default in serverless.yml). Writes the generated .env.deploy with those values and
+# RIDECORE_API_URL (Floci's HTTP API path for the stack); .env.local is the user's and never touched.
 deploy-api: build
 	@set -e; $(LOAD_ENV); \
-	table=$$(node -p "require('./cdk-outputs.json').RidecoreStateful.TableName"); \
-	$(FLOCI_ENV) RIDECORE_TABLE="$$table" npx serverless deploy; \
+	cdk_env=$$(node scripts/cdk-env.ts); eval "$$cdk_env"; \
+	$(FLOCI_ENV) npx serverless deploy; \
 	api_id=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's/^ *HttpApiId: *//p'); \
 	test -n "$$api_id" || { echo "HttpApiId not found in serverless info" >&2; exit 1; }; \
 	url="http://localhost:4567/_aws/execute-api/$$api_id/\$$default"; \
-	printf "RIDECORE_TABLE=%s\nRIDECORE_API_URL='%s'\n" "$$table" "$$url" > .env.deploy; \
+	{ printf '%s\n' "$$cdk_env" | sed 's/^export //'; printf "RIDECORE_API_URL='%s'\n" "$$url"; } > .env.deploy; \
 	curl -s -o /dev/null --max-time 30 "$$url/me/trips" || true; \
 	echo "API (Floci Lambda): $$url"; \
 	echo "Wrote .env.deploy"
@@ -44,10 +44,10 @@ deploy-api: build
 build:
 	npm run build
 
-# Packages the Lambda without any AWS access (dummy credentials, no login).
-# serverless.yml has no JWT secret default, so it comes from the env policy here.
+# Packages the Lambdas without any AWS access (dummy credentials, no login, placeholder ARNs).
+# serverless.yml has no JWT secret or ARN defaults, so they come from the env policy and cdk-env here.
 package: build
-	$(LOAD_ENV) && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
+	$(LOAD_ENV) && eval "$$(node scripts/cdk-env.ts --dummy)" && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
 
 seed:
 	npm run seed
@@ -84,3 +84,13 @@ test:
 
 lint:
 	npm run lint
+
+# Watch an event fail 3 times and land in the billing DLQ (about 2-3 minutes; ADR 0004).
+dlq-demo:
+	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
+	@$(LOAD_ENV) && node scripts/dlq-demo.ts
+
+# Move a DLQ's messages back to its queue: make redrive QUEUE=billing (or dispatch, driver-offers).
+redrive:
+	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
+	@$(LOAD_ENV) && node scripts/redrive.ts $(QUEUE)

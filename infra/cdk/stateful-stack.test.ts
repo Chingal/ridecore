@@ -1,5 +1,5 @@
 import { App } from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it, vi } from 'vitest';
 import { StatefulStack } from './stateful-stack.ts';
 
@@ -46,6 +46,69 @@ describe('StatefulStack', () => {
       .AttributeDefinitions;
     expect(defs.map((d) => d.AttributeName).sort()).toEqual(['GSI1PK', 'GSI1SK', 'GSI2PK', 'GSI2SK', 'PK', 'SK']);
     expect(defs.every((d) => d.AttributeType === 'S')).toBe(true);
+  });
+
+  it('defines the ridecore event bus', () => {
+    template.resourceCountIs('AWS::Events::EventBus', 1);
+    template.hasResourceProperties('AWS::Events::EventBus', { Name: 'ridecore' });
+  });
+
+  it('defines each consumer queue with a DLQ: 3 receives, 60 s visibility, 14-day DLQ retention', () => {
+    template.resourceCountIs('AWS::SQS::Queue', 7);
+    for (const name of ['ridecore-dispatch', 'ridecore-billing', 'ridecore-driver-offers']) {
+      template.hasResourceProperties('AWS::SQS::Queue', { QueueName: `${name}-dlq`, MessageRetentionPeriod: 1209600 });
+      template.hasResourceProperties('AWS::SQS::Queue', {
+        QueueName: name,
+        VisibilityTimeout: 60,
+        RedrivePolicy: { deadLetterTargetArn: Match.anyValue(), maxReceiveCount: 3 },
+      });
+    }
+  });
+
+  it('routes trip.requested to the dispatch queue and trip.completed to the billing queue', () => {
+    const rules = Object.values(template.findResources('AWS::Events::Rule')).map(
+      (r) => r.Properties as { EventPattern: unknown; Targets: { Arn: unknown }[] },
+    );
+    expect(rules).toHaveLength(2);
+    const targetOf = (type: string) => {
+      const rule = rules.find((r) => JSON.stringify(r.EventPattern) === JSON.stringify({ source: ['ridecore.trips'], 'detail-type': [type] }));
+      expect(rule, type).toBeDefined();
+      return JSON.stringify(rule?.Targets);
+    };
+    expect(targetOf('trip.requested')).toContain('DispatchQueue');
+    expect(targetOf('trip.completed')).toContain('BillingQueue');
+  });
+
+  it('fans driver offers out from an SNS topic to the driver-offers queue as raw messages', () => {
+    template.hasResourceProperties('AWS::SNS::Topic', { TopicName: 'ridecore-driver-offers' });
+    template.hasResourceProperties('AWS::SNS::Subscription', {
+      Protocol: 'sqs',
+      RawMessageDelivery: true,
+      Endpoint: { 'Fn::GetAtt': [Match.stringLikeRegexp('^DriverOffersQueue'), 'Arn'] },
+    });
+  });
+
+  it('keeps stream records the publisher could not deliver in a 14-day failure queue', () => {
+    template.hasResourceProperties('AWS::SQS::Queue', { QueueName: 'ridecore-publisher-failures', MessageRetentionPeriod: 1209600 });
+    template.hasOutput('PublisherFailuresQueueArn', {});
+  });
+
+  it('outputs everything the functions and scripts read', () => {
+    for (const name of [
+      'EventBusName',
+      'DispatchQueueArn',
+      'BillingQueueArn',
+      'DriverOffersQueueArn',
+      'DispatchQueueUrl',
+      'BillingQueueUrl',
+      'DriverOffersQueueUrl',
+      'DispatchDlqUrl',
+      'BillingDlqUrl',
+      'DriverOffersDlqUrl',
+      'OffersTopicArn',
+    ]) {
+      template.hasOutput(name, {});
+    }
   });
 
   it('outputs the table name and stream ARN', () => {
