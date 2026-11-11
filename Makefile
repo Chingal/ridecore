@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive
+.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map
 
 # Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
 # this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
@@ -97,3 +97,14 @@ dlq-demo:
 redrive:
 	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
 	@$(LOAD_ENV) && node scripts/redrive.ts $(QUEUE)
+
+# Live map demo (ADR 0005): prints what to paste into demo/map.html, then drives the seeded cars
+# around small loops for SECONDS (default 120). Open the page in a browser while it runs.
+SECONDS ?= 120
+demo-map:
+	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
+	@$(LOAD_ENV) && \
+	echo "Open:            file://$(CURDIR)/demo/map.html" && \
+	echo "WebSocket URL:   $$RIDECORE_WS_URL" && \
+	echo "Passenger token: $$(node scripts/dev-token.ts passenger passenger-1)" && \
+	node scripts/move-drivers.ts --seconds $(SECONDS)
