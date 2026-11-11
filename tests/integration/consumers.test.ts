@@ -2,6 +2,7 @@ import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDispatch, type Dispatch } from '../../src/app/dispatch.ts';
+import { DomainError } from '../../src/domain/errors.ts';
 import { toEvent } from '../../src/domain/events.ts';
 import { type LatLng, type Trip, transition } from '../../src/domain/trip.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
@@ -115,6 +116,18 @@ describe('dispatch.offerTripOnce (DynamoDB on Floci)', () => {
     await trips.save(trip, cancelled, toEvent(trip, cancelled));
 
     expect(await dispatch.offerTripOnce(trip.id)).toEqual({ driverIds: [], fresh: false });
+    expect(await offerItems(trip.id)).toEqual([]);
+  });
+
+  it('a cancelled offer write that nobody else won is an error (the event is retried), not an empty success', async () => {
+    const MEDELLIN: LatLng = { lat: 6.2442, lng: -75.5812 };
+    await seedDriver(north(MEDELLIN, 0.3));
+    const trip = await requestTrip(MEDELLIN);
+    const flaky = Object.create(drivers) as DriverRepo;
+    flaky.putOffers = () => Promise.reject(new DomainError('CONCURRENT_UPDATE', 409, 'transaction cancelled'));
+    const failing = createDispatch({ trips, drivers: flaky });
+
+    await expect(failing.offerTripOnce(trip.id)).rejects.toMatchObject({ code: 'CONCURRENT_UPDATE' });
     expect(await offerItems(trip.id)).toEqual([]);
   });
 

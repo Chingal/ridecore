@@ -120,7 +120,10 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): 
       } catch (err) {
         if (!isConcurrentUpdate(err)) throw err;
         const after = await load(tripId);
-        return { driverIds: after.trip.state === 'REQUESTED' ? after.offers.driverIds : [], fresh: false };
+        if (after.trip.state !== 'REQUESTED') return { driverIds: [], fresh: false };
+        // Cancelled but nobody recorded offers (throttling, a transaction conflict): retry the event.
+        if (after.offers.seq === 0) throw err;
+        return { driverIds: after.offers.driverIds, fresh: false };
       }
     },
 
