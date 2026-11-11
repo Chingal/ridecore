@@ -114,3 +114,20 @@ export const consumedKey = (consumer: string, eventId: string) => ({ PK: `CONSUM
 
 /** The billing record of a completed trip (written by the billing consumer). */
 export const billingKey = (tripId: string) => ({ PK: `TRIP#${tripId}`, SK: 'BILLING' });
+
+/** A WebSocket connection (ADR 0005). */
+export const connectionKey = (connectionId: string) => ({ PK: `CONN#${connectionId}`, SK: 'META' });
+
+/** GSI1 keys of a connection, to find every socket of one actor (role and id: a passenger and a driver never share). */
+export const connectionActorGsi1 = (role: string, actorId: string, connectionId: string) => ({
+  GSI1PK: `CONNACTOR#${role}#${actorId}`,
+  GSI1SK: `CONN#${connectionId}`,
+});
+
+/** GSI2 keys of a connection watching a map cell; shares GSI2 with the sparse `AVAIL#<cell>` keys, never their prefix. */
+export const watchGsi2 = (cell: string, connectionId: string) => ({ GSI2PK: watchCellPk(cell), GSI2SK: `CONN#${connectionId}` });
+
+export const watchCellPk = (cell: string) => `WATCH#${cell}`;
+
+/** "At most once per window" marker, e.g. one position broadcast per driver every few seconds. */
+export const throttleKey = (scope: string, id: string) => ({ PK: `THROTTLE#${scope}`, SK: id });
