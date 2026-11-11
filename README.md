@@ -4,9 +4,9 @@ The backend core of a ride-hailing service: passengers request trips, drivers ac
 Node.js + TypeScript on AWS serverless (Lambda, DynamoDB), built to be read in one sitting and run locally
 with one command, with no AWS account and no cost.
 
-> Status: **work in progress.** The trip API and its data model are built and tested (Plan 1).
-> Event consumers, real-time updates and the MCP server for AI agents are designed but not built yet
-> (see [Roadmap](#roadmap)).
+> Status: **work in progress.** The trip API, its data model (Plan 1) and the event path with its
+> consumers (Plan 2a) are built and tested. Real-time updates and the MCP server for AI agents are
+> designed but not built yet (see [Roadmap](#roadmap)).
 
 ## What it does today
 
@@ -25,7 +25,14 @@ with one command, with no AWS account and no cost.
   The stored response is written in the same transaction as the business change.
 - **Authorization per resource:** a passenger only sees and changes their own trips; a driver only acts on
   trips offered or assigned to them. JWT auth fails closed when the secret is missing or too short.
-- Structured JSON logs; every response carries an `x-correlation-id` header.
+- **Event-driven consumers** ([ADR 0004](docs/decisions/0004-event-delivery.md)): a publisher reads the
+  table stream and puts each outbox event on an EventBridge bus; rules route `trip.requested` to a dispatch
+  queue and `trip.completed` to a billing queue. Dispatch offers the trip to nearby drivers and fans each
+  offer out through SNS to a driver-offers queue; billing records the final fare. Every queue has a
+  dead-letter queue, consumers report partial batch failures, and each consumer is idempotent
+  (at-least-once delivery, duplicates are expected).
+- Structured JSON logs; every response carries an `x-correlation-id` header, and the same id travels in
+  the event to every consumer's log lines.
 
 ## Architecture
 
@@ -40,16 +47,21 @@ with one command, with no AWS account and no cost.
      DynamoDB single table  (trips, active-trip reservations,
      offers, idempotency records, outbox events) ── stream enabled
                      │
-                     ▼  (Plan 2)
-     Streams → EventBridge → SQS consumers with retries and DLQs
+                     ▼
+     stream → publisher Lambda → EventBridge bus `ridecore`
+          trip.requested → SQS dispatch ──► offers ──► SNS → SQS driver-offers
+          trip.completed → SQS billing  ──► billing record
+                           (each queue: 3 receives, then its DLQ)
 ```
 
 - `src/domain` — trip state machine, fare calculation (haversine distance), domain events and errors.
 - `src/app` — use cases: trips, dispatch, drivers.
 - `src/http` — routing, validation (zod), JWT auth (jose), responses, the Lambda entry point.
-- `src/infra/dynamo` — repositories, single-table keys, transactions, idempotency store.
-- `infra/cdk` — the stateful stack (DynamoDB table, indexes, stream) in AWS CDK.
-- `serverless.yml` — the API Lambda, deployed with `osls` (the MIT fork of Serverless Framework).
+- `src/infra/dynamo` — repositories, single-table keys, transactions, idempotency and dedup stores.
+- `src/events` — the outbox publisher, the SQS consumer harness and the consumers (dispatch, driver offers, billing).
+- `infra/cdk` — the stateful stack in AWS CDK: table, event bus, rules, SNS topic, queues and DLQs.
+- `serverless.yml` — the Lambdas (API, publisher, consumers) and their triggers, deployed with `osls`
+  (the MIT fork of Serverless Framework). It reads the CDK outputs one way only (`scripts/cdk-env.ts`).
 
 ## Run it locally
 
@@ -58,7 +70,7 @@ an AWS emulator; nothing reaches a real AWS account.
 
 ```bash
 npm ci
-make up          # starts Floci, deploys the table (CDK) and the API Lambda (osls), seeds 6 drivers and 1 passenger
+make up          # starts Floci, deploys the stateful stack (CDK) and the Lambdas (osls), seeds 6 drivers and 1 passenger
 make e2e         # full trip flow against the Lambda deployed in Floci
 make dev         # same handler as a local server on port 3000
 npm run token -- passenger <id>   # prints a dev JWT (make up also prints tokens for the seeded users)
@@ -74,12 +86,32 @@ Configuration is read in this order: exported env > `.env.local` (yours, git-ign
 |---|---|---|
 | Unit | domain, use cases, routing, validation, auth, repositories | `npm run test:unit` |
 | Integration | repositories, dispatch races and idempotency against DynamoDB in Floci | `npm run test:integration` |
-| End to end | a complete trip, against the Floci-deployed Lambda and against the local adapter | `make e2e`, `make e2e-local` |
+| Integration | consumers' idempotency, "offer once" under concurrency, DLQ redrive | `npm run test:integration` |
+| End to end | a complete trip: the offer arrives only through the dispatch consumer, the fare only through billing; against the Floci-deployed Lambda and the local adapter | `make e2e`, `make e2e-local` |
 
 GitHub Actions runs lint, type checks, unit tests, `cdk synth`, `serverless package`, a dependency audit,
 and then integration and e2e tests against Floci. CI needs no secrets and no AWS account. What e2e proves
 is the behaviour through the deployed Lambda in Floci; that the infrastructure also deploys to real AWS is
 only checked by synthesis and packaging.
+
+## Watch an event fail and recover
+
+`make dlq-demo` puts a `trip.completed` event with an unknown `schemaVersion` on the bus. The billing
+consumer rejects it on every receive; SQS retries it every 60 s and, after the third receive, moves it
+to the billing DLQ. Run on Floci:
+
+```
+Put trip.completed with schemaVersion 99 (correlationId dlq-demo-aadc8b20) on bus ridecore.
+The billing consumer rejects it on each receive; SQS retries it every 60 s, 3 receives in total.
+  t=  0s  billing in flight: 0  billing DLQ: 0
+  t= 10s  billing in flight: 1  billing DLQ: 0
+  ...
+  t=180s  billing in flight: 1  billing DLQ: 0
+  t=190s  billing in flight: 0  billing DLQ: 1
+billing DLQ: 1 message(s). Move it back with: make redrive QUEUE=billing
+```
+
+`make redrive QUEUE=billing` moves the messages back to the queue (after deploying a fix, in real life).
 
 ## Decisions
 
@@ -88,14 +120,15 @@ only checked by synthesis and packaging.
 - [ADR 0002 — Dependency audit](docs/decisions/0002-dependency-audit.md): how audit findings are handled in CI.
 - [ADR 0003 — MCP server tool design](docs/decisions/0003-mcp-tool-design.md): four task-shaped tools instead
   of one per endpoint, and when to add tool search or code execution.
+- [ADR 0004 — Event delivery](docs/decisions/0004-event-delivery.md): outbox → stream → EventBridge → SQS
+  with DLQs, SNS fan-out, idempotent consumers, the CDK/osls split, and the Floci spike behind it.
 - [Design spec](docs/superpowers/specs/2026-11-09-ridecore-design.md) and
   [implementation plan](docs/superpowers/plans/2026-11-09-ridecore-core.md).
 
 ## Roadmap
 
-1. **Events (Plan 2):** a publisher from DynamoDB Streams to EventBridge; SQS consumers for driver offers,
-   fares and notifications, with idempotent handlers, retries, dead-letter queues and a redrive demo.
-2. **Real time (Plan 2):** API Gateway WebSocket API — trip updates to each trip's passenger and driver,
+1. ~~**Events (Plan 2a):** outbox publisher, SQS consumers with DLQs, SNS fan-out, redrive demo.~~ Done.
+2. **Real time (Plan 2b):** API Gateway WebSocket API — trip updates to each trip's passenger and driver,
    nearby available cars on the passenger's map, and a small demo map page.
 3. **MCP server (Plan 3):** lets an AI agent request a trip, check its status, cancel it and list the
    passenger's trips through the real API ([ADR 0003](docs/decisions/0003-mcp-tool-design.md)).
