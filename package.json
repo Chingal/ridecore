@@ -18,13 +18,15 @@
     "dev": "node --import ./scripts/load-env.ts src/local/server.ts",
     "seed": "node --import ./scripts/load-env.ts scripts/seed.ts",
     "package": "npm run build && eval \"$(node scripts/load-env.ts --print)\" && serverless package",
-    "mcp": "node --import ./scripts/load-env.ts src/mcp/main.ts"
+    "mcp": "node --import ./scripts/load-env.ts src/mcp/main.ts",
+    "coverage": "vitest run --project unit --coverage"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/aws-lambda": "^8.10.164",
     "@types/ngeohash": "^0.6.8",
     "@types/node": "^24.19.2",
+    "@vitest/coverage-v8": "^5.1.0",
     "aws-cdk": "^2.1148.0",
     "aws-cdk-lib": "^2.275.0",
     "constructs": "^10.8.1",
