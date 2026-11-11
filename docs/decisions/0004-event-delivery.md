@@ -46,7 +46,7 @@ Every trip state change already writes the trip and its `TripEvent` in one Dynam
 
 ## Guarantees
 
-At-least-once delivery; consumers tolerate duplicates. Order is kept per trip from the stream to EventBridge (stream shard order plus the per-trip chunking above); SQS standard queues do not guarantee order, so consumers check state instead of trusting arrival order (dispatch ignores a `trip.requested` for a trip that is no longer `REQUESTED`).
+At-least-once delivery; consumers tolerate duplicates. Order is best effort, not guaranteed: DynamoDB Streams orders records per item, and each outbox event is its own item, so AWS does not promise that two events of one trip reach the publisher in write order. Within a batch the publisher keeps the order it receives (the per-trip chunking above never lets a later event of a trip overtake an earlier one that failed). SQS standard queues do not guarantee order either, so consumers check state instead of trusting arrival order (dispatch ignores a `trip.requested` for a trip that is no longer `REQUESTED`).
 
 ## Consequences
 
