@@ -1,7 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
+import { parseEnv } from 'node:util';
 
 /**
  * The ridecore-location side of the local stack (docs/load-testing.md, "Go path").
@@ -9,6 +10,7 @@ import { resolve } from 'node:path';
  *   node --import ./scripts/load-env.ts scripts/location.ts env     # add missing variables to .env.local
  *   node --import ./scripts/load-env.ts scripts/location.ts start   # Redis + Kafka + the Go service
  *   node --import ./scripts/load-env.ts scripts/location.ts stop
+ *   node scripts/location.ts lambda-env                            # export line for `make deploy-api`
  *
  * The Go repository lives next to this one (LOCATION_DIR, default ../ridecore-location). The service
  * runs as a built binary in the background (pid in .load/location.pid, log in .load/location.log).
@@ -33,12 +35,8 @@ const LOG_FILE = '.load/location.log';
  */
 export function ensureLocationEnv(file: string): string[] {
   const text = existsSync(file) ? readFileSync(file, 'utf8') : '';
-  const defined = new Set(
-    text
-      .split('\n')
-      .map((line) => /^\s*([A-Z_][A-Z0-9_]*)\s*=/.exec(line)?.[1])
-      .filter((name): name is string => name !== undefined),
-  );
+  // The same parser as the env policy (scripts/env.ts), so `export X=...` and quoted values count.
+  const defined = new Set(Object.keys(parseEnv(text)));
   const missing = Object.keys(LOCATION_DEFAULTS).filter((name) => !defined.has(name));
   if (missing.length === 0) return [];
   const prefix = text === '' || text.endsWith('\n') ? '' : '\n';
@@ -63,23 +61,68 @@ export async function locationPreflight(env: NodeJS.ProcessEnv, doFetch: typeof 
   }
 }
 
+/**
+ * The one switch is RIDECORE_LOCATION_URL. The Lambdas run in Docker on Floci and cannot use the
+ * host's 127.0.0.1, so they get RIDECORE_LOCATION_LAMBDA_URL (default host.docker.internal) — but only
+ * when the switch is on. Off: empty, whatever RIDECORE_LOCATION_LAMBDA_URL says.
+ */
+export function lambdaLocationUrl(env: NodeJS.ProcessEnv): string {
+  if (!env.RIDECORE_LOCATION_URL?.trim()) return '';
+  return env.RIDECORE_LOCATION_LAMBDA_URL?.trim() || 'http://host.docker.internal:8090';
+}
+
+/**
+ * Before a load run: null when the deployed dispatch Lambda is on the requested path, otherwise why
+ * not. A run whose sockets, actors and dispatch disagree would measure a hybrid of both paths.
+ */
+export function deployedPathMismatch(requestedGo: boolean, deployedUrl: string | undefined): string | null {
+  const deployedGo = (deployedUrl ?? '').trim() !== '';
+  if (requestedGo === deployedGo) return null;
+  return requestedGo
+    ? "LOCATION=1, but the deployed dispatch reads the DynamoDB index: run 'make up LOCATION=1' (or 'make deploy-api' with RIDECORE_LOCATION_URL set)"
+    : "the deployed dispatch uses ridecore-location, but LOCATION is not 1: add LOCATION=1, or redeploy with RIDECORE_LOCATION_URL empty ('RIDECORE_LOCATION_URL= make deploy-api')";
+}
+
+/** A pid file's content as a positive integer, or null (empty, 0, negative or not a number). */
+export function readPid(text: string): number | null {
+  const t = text.trim();
+  if (!/^[1-9][0-9]*$/.test(t)) return null;
+  return Number(t);
+}
+
+/** True only if `pid` is running `binary` (Linux /proc), so a reused pid is never signalled. */
+export function isOurProcess(pid: number, binary: string): boolean {
+  try {
+    return readlinkSync(`/proc/${pid}/exe`) === binary;
+  } catch {
+    return false;
+  }
+}
+
 function docker0(): string | undefined {
   return networkInterfaces().docker0?.find((a) => a.family === 'IPv4')?.address;
 }
 
+const binaryOf = (dir: string) => `${dir}/bin/location`;
+const locationDir = () => resolve(process.env.LOCATION_DIR ?? '../ridecore-location');
+
+/** The service's pid, if the pid file names a live process running our binary; a stale file is removed. */
 function running(): number | null {
   if (!existsSync(PID_FILE)) return null;
-  const pid = Number(readFileSync(PID_FILE, 'utf8').trim());
-  try {
-    process.kill(pid, 0);
-    return pid;
-  } catch {
-    return null;
-  }
+  const pid = readPid(readFileSync(PID_FILE, 'utf8'));
+  if (pid !== null && isOurProcess(pid, binaryOf(locationDir()))) return pid;
+  rmSync(PID_FILE, { force: true });
+  return null;
+}
+
+async function stopAndWait(pid: number): Promise<void> {
+  process.kill(pid, 'SIGTERM');
+  for (let i = 0; i < 50 && isOurProcess(pid, binaryOf(locationDir())); i++) await new Promise((r) => setTimeout(r, 200));
+  rmSync(PID_FILE, { force: true });
 }
 
 async function start(): Promise<void> {
-  const dir = resolve(process.env.LOCATION_DIR ?? '../ridecore-location');
+  const dir = locationDir();
   if (!existsSync(`${dir}/go.mod`)) throw new Error(`ridecore-location not found at ${dir} (set LOCATION_DIR)`);
   const env = process.env;
   for (const name of ['RIDECORE_JWT_SECRET', 'RIDECORE_LOCATION_KEY', 'RIDECORE_LOCATION_TRIPS_QUEUE_URL']) {
@@ -93,14 +136,11 @@ async function start(): Promise<void> {
   must('go', ['build', '-trimpath', '-o', 'bin/location', './cmd/location']);
 
   const old = running();
-  if (old !== null) {
-    process.kill(old, 'SIGTERM');
-    await new Promise((r) => setTimeout(r, 1000));
-  }
+  if (old !== null) await stopAndWait(old);
   mkdirSync('.load', { recursive: true });
   const log = openSync(LOG_FILE, 'a');
   const bridge = docker0();
-  const child = spawn(`${dir}/bin/location`, [], {
+  const child = spawn(binaryOf(dir), [], {
     cwd: dir,
     detached: true,
     stdio: ['ignore', log, log],
@@ -134,13 +174,13 @@ async function start(): Promise<void> {
   throw new Error(`ridecore-location did not become healthy in 30 s; see ${LOG_FILE}`);
 }
 
-function stop(): void {
+async function stop(): Promise<void> {
   const pid = running();
   if (pid === null) {
     console.log('ridecore-location: not running');
     return;
   }
-  process.kill(pid, 'SIGTERM');
+  await stopAndWait(pid);
   console.log(`ridecore-location: stopped (pid ${pid})`);
 }
 
@@ -151,8 +191,9 @@ if (process.argv[1]?.endsWith('location.ts')) {
       const added = ensureLocationEnv('.env.local');
       console.log(added.length > 0 ? `.env.local: added ${added.join(', ')}` : '.env.local: location variables already set');
     } else if (command === 'start') await start();
-    else if (command === 'stop') stop();
-    else throw new Error('usage: scripts/location.ts env|start|stop');
+    else if (command === 'stop') await stop();
+    else if (command === 'lambda-env') console.log(`export RIDECORE_LOCATION_LAMBDA_URL='${lambdaLocationUrl(process.env)}'`);
+    else throw new Error('usage: scripts/location.ts env|start|stop|lambda-env');
   } catch (err) {
     console.error((err as Error).message);
     process.exit(1);

@@ -2,7 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { createDynamoClient } from '../../src/infra/dynamo/client.ts';
-import { locationPreflight } from '../location.ts';
+import { GetFunctionConfigurationCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import { deployedPathMismatch, locationPreflight } from '../location.ts';
 
 /**
  * `make load PROFILE=...` (docs/load-testing.md): setup -> DLQ baseline -> k6 -> invariant check,
@@ -11,6 +12,8 @@ import { locationPreflight } from '../location.ts';
  */
 const K6_IMAGE = 'grafana/k6:2.3.0';
 const K6_CONTAINER = 'ridecore-load-k6';
+/** The dispatch consumer as osls names it (service ridecore, stage dev). */
+const DISPATCH_FUNCTION = 'ridecore-dev-dispatch';
 
 // Ctrl-C reaches the child (same process group) and stops it; this process must outlive it so the
 // `finally` below still tears the actors down.
@@ -36,6 +39,21 @@ if (locationError !== null) {
   process.exit(1);
 }
 const goPath = process.env.LOCATION === '1';
+// The deployed dispatch Lambda decides where drivers are looked up; actors and sockets must match it.
+let deployedUrl: string | undefined;
+try {
+  const fn = await new LambdaClient({}).send(new GetFunctionConfigurationCommand({ FunctionName: DISPATCH_FUNCTION }), { abortSignal: AbortSignal.timeout(5000) });
+  deployedUrl = fn.Environment?.Variables?.RIDECORE_LOCATION_URL;
+} catch (err) {
+  console.error(`load: cannot read the deployed ${DISPATCH_FUNCTION} (${(err as Error).name}): run 'make up' first`);
+  process.exit(1);
+}
+const mismatch = deployedPathMismatch(goPath, deployedUrl);
+if (mismatch !== null) {
+  console.error(`load: ${mismatch}`);
+  process.exit(1);
+}
+console.log(`load: path ${goPath ? 'Go (ridecore-location)' : 'DynamoDB index'}, matching the deployed dispatch`);
 if (goPath) console.log(`load: Go path, positions and map through ridecore-location (${process.env.RIDECORE_LOCATION_WS_URL})`);
 
 const node = (script: string, ...args: string[]) =>

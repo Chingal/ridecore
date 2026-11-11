@@ -42,6 +42,8 @@ deploy-stateful:
 deploy-api: build
 	@set -e; $(LOAD_ENV); \
 	cdk_env=$$(node scripts/cdk-env.ts); eval "$$cdk_env"; \
+	eval "$$(node scripts/location.ts lambda-env)"; \
+	echo "ridecore-location for the Lambdas: $${RIDECORE_LOCATION_LAMBDA_URL:-off}"; \
 	$(FLOCI_ENV) npx serverless deploy; \
 	api_id=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's/^ *HttpApiId: *//p'); \
 	test -n "$$api_id" || { echo "HttpApiId not found in serverless info" >&2; exit 1; }; \
@@ -60,7 +62,7 @@ build:
 # Packages the Lambdas without any AWS access (dummy credentials, no login, placeholder ARNs).
 # serverless.yml has no JWT secret or ARN defaults, so they come from the env policy and cdk-env here.
 package: build
-	$(LOAD_ENV) && eval "$$(node scripts/cdk-env.ts --dummy)" && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
+	$(LOAD_ENV) && eval "$$(node scripts/cdk-env.ts --dummy)" && eval "$$(node scripts/location.ts lambda-env)" && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
 
 seed:
 	npm run seed

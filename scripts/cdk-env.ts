@@ -26,6 +26,7 @@ const MAPPING = {
   NotificationsQueueUrl: 'RIDECORE_NOTIFICATIONS_QUEUE_URL',
   NotificationsDlqUrl: 'RIDECORE_NOTIFICATIONS_DLQ_URL',
   LocationTripsQueueUrl: 'RIDECORE_LOCATION_TRIPS_QUEUE_URL',
+  LocationTripsDlqUrl: 'RIDECORE_LOCATION_TRIPS_DLQ_URL',
 } as const;
 
 const ACCOUNT = 'arn:aws:%s:us-east-1:000000000000:';
@@ -52,6 +53,7 @@ export const DUMMY_OUTPUTS: Record<keyof typeof MAPPING, string> = {
   NotificationsQueueUrl: url('ridecore-notifications'),
   NotificationsDlqUrl: url('ridecore-notifications-dlq'),
   LocationTripsQueueUrl: url('ridecore-location-trips'),
+  LocationTripsDlqUrl: url('ridecore-location-trips-dlq'),
 };
 
 export function cdkEnv(outputs: Record<string, string>): Record<string, string> {

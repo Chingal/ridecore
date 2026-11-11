@@ -81,10 +81,15 @@ export function evaluate(s: Snapshot): string[] {
 /** Main queues and DLQs read by invariant 5: dispatch, billing, driver-offers, notifications, each with its DLQ. */
 export const QUEUE_COUNT = 8;
 
+/** On the Go path (LOCATION=1) the ridecore-location trip-assignments queue and its DLQ are read too. */
+export function requiredQueueCount(env: NodeJS.ProcessEnv): number {
+  return env.LOCATION === '1' ? QUEUE_COUNT + 2 : QUEUE_COUNT;
+}
+
 /** Any violation fails, and so does a check that skipped a part: no trips, no drivers, or missing queues. */
-export function exitCode(result: CheckResult): 0 | 1 {
+export function exitCode(result: CheckResult, required: number = QUEUE_COUNT): 0 | 1 {
   const { trips, drivers, queues } = result.read;
-  return result.violations.length > 0 || trips === 0 || drivers === 0 || queues < QUEUE_COUNT ? 1 : 0;
+  return result.violations.length > 0 || trips === 0 || drivers === 0 || queues < required ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- reading Floci
@@ -95,8 +100,10 @@ const BASELINE_FILE = '.load/baseline.json';
 type Baseline = { startedAt: string; dlq: Record<string, number> };
 const DRAIN_WAIT_MS = 60_000;
 
-function queueUrls(env: NodeJS.ProcessEnv): { name: string; url: string; dlq: boolean }[] {
-  return QUEUES.flatMap((q) => {
+/** The queues invariant 5 reads; with LOCATION=1 also ridecore-location's trip-assignments queue. */
+export function queueUrls(env: NodeJS.ProcessEnv): { name: string; url: string; dlq: boolean }[] {
+  const names: readonly string[] = env.LOCATION === '1' ? [...QUEUES, 'LOCATION_TRIPS'] : QUEUES;
+  return names.flatMap((q) => {
     const name = q.toLowerCase().replace('_', '-');
     const main = env[`RIDECORE_${q}_QUEUE_URL`];
     const dlq = env[`RIDECORE_${q}_DLQ_URL`];
@@ -235,6 +242,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   for (const line of result.violations) console.log(`  - ${line}`);
   if (read.trips === 0) console.log('  - no trips read: the run did nothing to check');
   if (read.drivers === 0) console.log('  - no drivers read');
-  if (read.queues < QUEUE_COUNT) console.log(`  - only ${read.queues} of ${QUEUE_COUNT} queues read: check the RIDECORE_*_QUEUE_URL / _DLQ_URL settings`);
-  process.exit(exitCode(result));
+  const required = requiredQueueCount(process.env);
+  if (read.queues < required) console.log(`  - only ${read.queues} of ${required} queues read: check the RIDECORE_*_QUEUE_URL / _DLQ_URL settings`);
+  process.exit(exitCode(result, requiredQueueCount(process.env)));
 }

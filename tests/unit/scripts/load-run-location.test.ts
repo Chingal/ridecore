@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ensureLocationEnv, locationPreflight } from '../../../scripts/location.ts';
+import { deployedPathMismatch, ensureLocationEnv, isOurProcess, lambdaLocationUrl, locationPreflight, readPid } from '../../../scripts/location.ts';
 
 const NOT_REACHABLE = "ridecore-location is not reachable: run 'make up LOCATION=1'";
 
@@ -55,5 +55,62 @@ describe('ensureLocationEnv', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'ridecore-env-')), '.env.local');
     expect(ensureLocationEnv(file)).toHaveLength(4);
     expect(readFileSync(file, 'utf8')).toContain('RIDECORE_LOCATION_KEY=dev-only-location-internal-key-change-me');
+  });
+});
+
+describe('lambdaLocationUrl (one switch: RIDECORE_LOCATION_URL)', () => {
+  it.each([
+    [{}, ''],
+    [{ RIDECORE_LOCATION_URL: '' }, ''],
+    [{ RIDECORE_LOCATION_URL: '', RIDECORE_LOCATION_LAMBDA_URL: 'http://host.docker.internal:8090' }, ''],
+    [{ RIDECORE_LOCATION_URL: 'http://127.0.0.1:8090' }, 'http://host.docker.internal:8090'],
+    [{ RIDECORE_LOCATION_URL: 'http://127.0.0.1:8090', RIDECORE_LOCATION_LAMBDA_URL: 'http://10.0.0.5:8090' }, 'http://10.0.0.5:8090'],
+  ])('%j → %j', (env, want) => {
+    expect(lambdaLocationUrl(env)).toBe(want);
+  });
+});
+
+describe('readPid and isOurProcess', () => {
+  it.each(['', '0', '-5', 'abc', '12x', '1.5'])('rejects %j', (text) => {
+    expect(readPid(text)).toBeNull();
+  });
+
+  it('reads a positive integer', () => {
+    expect(readPid(' 4242\n')).toBe(4242);
+  });
+
+  it('does not take another process for the service', () => {
+    expect(isOurProcess(process.pid, '/nonexistent/ridecore-location/bin/location')).toBe(false);
+  });
+});
+
+describe('ensureLocationEnv reads the file like the env loader', () => {
+  it('recognises export lines and quoted values, and adds nothing over them', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'ridecore-env-')), '.env.local');
+    writeFileSync(
+      file,
+      [
+        'export RIDECORE_LOCATION_KEY=my-own-key-of-at-least-32-characters!!',
+        'RIDECORE_LOCATION_URL="http://127.0.0.1:9999"',
+        "RIDECORE_LOCATION_LAMBDA_URL='http://10.0.0.5:9999'",
+        'RIDECORE_LOCATION_WS_URL=ws://127.0.0.1:9999',
+        '',
+      ].join('\n'),
+    );
+    expect(ensureLocationEnv(file)).toEqual([]);
+    expect(readFileSync(file, 'utf8')).not.toContain('dev-only-location-internal-key-change-me');
+  });
+});
+
+describe('deployedPathMismatch', () => {
+  it('is null when the deployed dispatch matches the requested path', () => {
+    expect(deployedPathMismatch(true, 'http://host.docker.internal:8090')).toBeNull();
+    expect(deployedPathMismatch(false, '')).toBeNull();
+    expect(deployedPathMismatch(false, undefined)).toBeNull();
+  });
+
+  it('explains a mismatch in both directions', () => {
+    expect(deployedPathMismatch(true, '')).toMatch(/deployed dispatch reads the DynamoDB index/);
+    expect(deployedPathMismatch(false, 'http://host.docker.internal:8090')).toMatch(/deployed dispatch uses ridecore-location/);
   });
 });
