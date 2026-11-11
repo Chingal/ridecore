@@ -13,7 +13,7 @@ npm ci && make up && make demo     # needs Node.js 26 and Docker
 ```
 
 ```mermaid
-flowchart LR
+flowchart TB
   client[Passenger / driver apps] -->|HTTP + JWT| api[HTTP API · Lambda]
   agent[AI agent] -->|MCP stdio| mcp[MCP server] -->|HTTP| api
   api -->|one transaction: trip + event| db[(DynamoDB<br/>single table)]
