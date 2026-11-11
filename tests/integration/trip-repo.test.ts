@@ -96,6 +96,16 @@ describe('TripRepo (DynamoDB on Floci)', () => {
     expect(await rawItem(`TRIP#${outside.id}`, 'EVENT#000001')).not.toHaveProperty('correlationId');
   });
 
+  it('the outbox ignores a correlation id carried by the event itself; only the run decides', async () => {
+    const stale = newTrip(`p-${randomUUID()}`);
+    await repo.create(stale, { ...toEvent(null, stale), correlationId: 'stale' });
+    expect(await rawItem(`TRIP#${stale.id}`, 'EVENT#000001')).not.toHaveProperty('correlationId');
+
+    const replaced = newTrip(`p-${randomUUID()}`);
+    await runWithCorrelation('fresh', () => repo.create(replaced, { ...toEvent(null, replaced), correlationId: 'stale' }));
+    expect(await rawItem(`TRIP#${replaced.id}`, 'EVENT#000001')).toMatchObject({ correlationId: 'fresh' });
+  });
+
   it('get returns null for an unknown trip', async () => {
     expect(await repo.get(randomUUID())).toBeNull();
   });

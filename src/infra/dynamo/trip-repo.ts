@@ -43,6 +43,13 @@ function correlation(): { correlationId?: string } {
   return correlationId === undefined ? {} : { correlationId };
 }
 
+/** The event without any correlation id it carries: only the current run decides (see `correlation`). */
+function withoutCorrelation(event: TripEvent): Omit<TripEvent, 'correlationId'> {
+  const rest: Omit<TripEvent, 'correlationId'> & { correlationId?: string } = { ...event };
+  delete rest.correlationId;
+  return rest;
+}
+
 const BATCH_GET_MAX_KEYS = 100;
 const BATCH_GET_MAX_ATTEMPTS = 5;
 
@@ -212,7 +219,7 @@ export class TripRepo {
     return {
       Put: {
         TableName: this.tableName,
-        Item: { ...event, ...correlation(), ...outboxKey(event.tripId, event.version), entity: 'EVENT' },
+        Item: { ...withoutCorrelation(event), ...correlation(), ...outboxKey(event.tripId, event.version), entity: 'EVENT' },
         ConditionExpression: 'attribute_not_exists(PK)',
       },
     };
