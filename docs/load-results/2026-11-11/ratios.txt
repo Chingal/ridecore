@@ -1,0 +1,4 @@
+# node scripts/load/ratios.ts <from> <to> 600, run on 2026-11-11 after the three runs
+{"from":"2026-11-11T17:19:14","to":"2026-11-11T17:25:24","trips":419,"offered":98,"finished":69,"billed":15}
+{"from":"2026-11-11T17:25:29","to":"2026-11-11T17:27:26","trips":116,"offered":22,"finished":18,"billed":1}
+{"from":"2026-11-11T17:27:33","to":"2026-11-11T17:29:41","trips":0,"offered":0,"finished":0,"billed":0}

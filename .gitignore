@@ -8,3 +8,4 @@ dist/
 .env.local
 .env.deploy
 cdk-outputs.json
+.load/
