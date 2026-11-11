@@ -1,12 +1,34 @@
 # ridecore
 
-The backend core of a ride-hailing service: passengers request trips, drivers accept and complete them.
-Node.js + TypeScript on AWS serverless (Lambda, DynamoDB), built to be read in one sitting and run locally
+[![CI](https://github.com/Chingal/ridecore/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Chingal/ridecore/actions/workflows/ci.yml)
+![Node.js 26](https://img.shields.io/badge/node-26-339933)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+The backend core of a ride-hailing service, event-driven and serverless on AWS (Node.js + TypeScript, Lambda,
+DynamoDB, EventBridge, SQS, SNS, WebSocket), with an MCP server so AI agents can request trips. It runs locally
 with one command, with no AWS account and no cost.
 
-> Status: the trip API and its data model (Plan 1), the event path with its consumers (Plan 2a),
-> real-time updates over WebSocket (Plan 2b) and the MCP server for AI agents (Plan 3) are built and
-> tested. See [Roadmap](#roadmap) for what is left.
+```bash
+npm ci && make up && make demo     # needs Node.js 26 and Docker
+```
+
+```mermaid
+flowchart LR
+  client[Passenger / driver apps] -->|HTTP + JWT| api[HTTP API · Lambda]
+  agent[AI agent] -->|MCP stdio| mcp[MCP server] -->|HTTP| api
+  api -->|one transaction: trip + event| db[(DynamoDB<br/>single table)]
+  db -->|stream| pub[publisher] --> bus{{EventBridge}}
+  bus -->|trip.requested| dq[SQS dispatch] --> disp[dispatch] -->|offers| sns{{SNS}} --> oq[SQS driver-offers]
+  bus -->|trip.completed| bq[SQS billing] --> bill[billing]
+  bus -->|trip.*| nq[SQS notifications] --> notif[notifier]
+  db -->|stream: driver items| pos[positions]
+  oq --> offers[driver-offers] --> ws[WebSocket API]
+  notif --> ws
+  pos --> ws
+  ws --> client
+```
+
+Delivery is at-least-once: every queue has a dead-letter queue, and every consumer tolerates duplicates. The decisions behind this are in [`docs/decisions/`](#decisions).
 
 ## What it does today
 
@@ -43,30 +65,9 @@ with one command, with no AWS account and no cost.
 - Structured JSON logs; every response carries an `x-correlation-id` header, and the same id travels in
   the event to every consumer's log lines.
 
-## Architecture
+## Code layout
 
-```
-            HTTP API (API Gateway)
-                     │
-                     ▼
-        Lambda (Node.js 24 runtime)          local adapter (same handler, port 3000)
-   http → app (use cases) → domain (pure)    ── used for fast e2e runs
-                     │
-                     ▼
-     DynamoDB single table  (trips, active-trip reservations,
-     offers, idempotency records, outbox events) ── stream enabled
-                     │
-                     ▼
-     stream → publisher Lambda → EventBridge bus `ridecore`
-          trip.requested → SQS dispatch ──► offers ──► SNS → SQS driver-offers
-          trip.completed → SQS billing  ──► billing record
-                           (each queue: 3 receives, then its DLQ)
-          every trip.* → SQS notifications ──► notifier ──┐
-     stream (driver items) → positions Lambda ────────────┤ PostToConnection
-     driver-offers consumer ──────────────────────────────┤
-                                                          ▼
-     WebSocket API ($connect / $disconnect / $default) ── passengers, drivers, demo/map.html
-```
+The Lambdas run on the `nodejs24.x` runtime ([ADR 0001](docs/decisions/0001-toolchain-spike.md)); `make dev` serves the same HTTP handler on port 3000.
 
 - `src/domain` — trip state machine, fare calculation (haversine distance), domain events and errors.
 - `src/app` — use cases: trips, dispatch, drivers.
@@ -87,7 +88,9 @@ an AWS emulator; nothing reaches a real AWS account.
 ```bash
 npm ci
 make up          # starts Floci, deploys the stateful stack (CDK) and the Lambdas (osls), seeds 6 drivers and 1 passenger
+make demo        # one whole trip, step by step (see "See it work")
 make e2e         # full trip flow against the Lambda deployed in Floci
+make coverage    # unit-test coverage of src/
 make demo-map    # live map: prints the URL and a token for demo/map.html, then moves the seeded cars
 make dev         # same handler as a local server on port 3000
 npm run token -- passenger <id>   # prints a dev JWT (make up also prints tokens for the seeded users)
@@ -108,16 +111,37 @@ Configuration is read in this order: exported env > `.env.local` (yours, git-ign
 | End to end | real time over WebSocket: a car on the map, the offer pushed to the driver, trip updates to both, the car leaving the map, the driver's position only to the passenger | `make e2e` |
 | End to end | the MCP server as a child process over stdio: request, one active trip only, status, list, cancel; a driver token and another passenger's trip are refused | `make e2e`, `make e2e-local` |
 
-GitHub Actions runs lint, type checks, unit tests, `cdk synth`, `serverless package`, a dependency audit,
+Unit-test coverage of `src/` (`make coverage`; integration and e2e tests are not counted): 61% of lines,
+55% of branches. The CI job summary shows the current numbers on every run.
+
+GitHub Actions runs lint, type checks, unit tests with coverage, `cdk synth`, `serverless package`, a dependency audit,
 and then integration and e2e tests against Floci. CI needs no secrets and no AWS account. What e2e proves
 is the behaviour through the deployed Lambda in Floci; that the infrastructure also deploys to real AWS is
 only checked by synthesis and packaging.
 
-## Watch the map
+## See it work
 
-`make demo-map` prints the WebSocket URL and a passenger token. It then drives the six seeded cars around
-small loops for two minutes. Open `demo/map.html` (Leaflet + OpenStreetMap), paste both values and press
-Connect: the cars move, and any trip that passenger requests shows its state changes as they happen.
+`make demo` runs one whole trip through the HTTP API deployed in Floci. The offer reaches the driver only
+through the dispatch consumer, and the final fare only through the billing consumer. A real run:
+
+```
+[  0.2s] passenger-1 request      -> REQUESTED       v1  trip ee78e066, fare estimate 7402 COP
+[  5.5s] driver-1    got the offer (through the dispatch consumer)
+[  5.5s] driver-1    accept       -> ACCEPTED        v2
+[  5.5s] driver-1    arrive       -> DRIVER_ARRIVED  v3
+[  5.6s] driver-1    start        -> IN_PROGRESS     v4
+[  5.6s] driver-1    complete     -> COMPLETED       v5
+[  5.6s] passenger-1 rate 5       -> RATED           v6
+[  5.6s] billing     final fare 7402 COP (through the billing consumer)
+```
+
+`make demo-map` drives the six seeded cars around small loops. It prints a WebSocket URL and a passenger token
+to paste into `demo/map.html` (Leaflet + OpenStreetMap):
+
+![The live map: six available cars around the centre of Popayán, pushed over WebSocket](docs/img/live-map.png)
+
+An AI agent can do the same through the MCP server. [`docs/mcp-example.md`](docs/mcp-example.md) shows a real
+`claude -p` run that requests a trip, checks its status and cancels it.
 
 ## Use it from an AI agent
 
@@ -178,17 +202,30 @@ billing DLQ: 1 message(s). Move it back with: make redrive QUEUE=billing
   with DLQs, SNS fan-out, idempotent consumers, the CDK/osls split, and the Floci spike behind it.
 - [ADR 0005 — Real-time updates](docs/decisions/0005-real-time.md): WebSocket API, routing by actor, the three
   delivery patterns, client-side ordering, the map throttle, and the Floci spike behind it.
-- [Design spec](docs/superpowers/specs/2026-11-09-ridecore-design.md) and
-  [implementation plan](docs/superpowers/plans/2026-11-09-ridecore-core.md).
+- [ADR 0006 — Single-table design](docs/decisions/0006-single-table-design.md): every access pattern and the key
+  or index that serves it.
+- [ADR 0007 — Idempotency and locking](docs/decisions/0007-idempotency-and-locking.md): Idempotency-Key,
+  optimistic locking, and one active trip per passenger and per driver, each as one conditional transaction.
+- [Design spec](docs/superpowers/specs/2026-11-09-ridecore-design.md) and the implementation plans:
+  [core](docs/superpowers/plans/2026-11-09-ridecore-core.md), [events](docs/superpowers/plans/2026-11-10-ridecore-events.md),
+  [real time](docs/superpowers/plans/2026-11-11-ridecore-realtime.md), [MCP](docs/superpowers/plans/2026-11-11-ridecore-mcp.md),
+  [README and demo](docs/superpowers/plans/2026-11-11-ridecore-readme.md).
 
-## Roadmap
+## Status and limitations
 
-1. ~~**Events (Plan 2a):** outbox publisher, SQS consumers with DLQs, SNS fan-out, redrive demo.~~ Done.
-2. ~~**Real time (Plan 2b):** WebSocket API, trip updates, offers, cars on the map, demo map page.~~ Done.
-3. ~~**MCP server (Plan 3):** four passenger tools for AI agents over the real API.~~ Done.
+Built and tested: the trip API and data model, the event path, real-time updates, the MCP server, and this
+documentation with its demo.
 
-Known limitations: only `STANDARD` trips (fare by straight-line distance); an unaccepted trip waits until the
-passenger cancels (no expiry or re-offer); auth is a minimal JWT stand-in, not production identity.
+- Only `STANDARD` trips, with the fare from the straight-line distance.
+- An unaccepted trip waits until the passenger cancels: there is no expiry and no re-offer.
+- Auth is a minimal JWT stand-in, not production identity.
+- All functions share one IAM role (ADR 0004, ADR 0005).
+
+## Background
+
+ridecore is inspired by a ride-hailing platform the author designed and built in 2016-2018. This is a new
+codebase written from scratch in 2026. It contains no code, names or data from that platform, and it reuses
+only knowledge of the domain.
 
 ## License
 
