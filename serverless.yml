@@ -20,6 +20,10 @@ provider:
     # Event path (ADR 0004): names and ARNs from the CDK outputs, exported by the Makefile. No defaults.
     RIDECORE_EVENT_BUS: ${env:RIDECORE_EVENT_BUS}
     RIDECORE_OFFERS_TOPIC_ARN: ${env:RIDECORE_OFFERS_TOPIC_ARN}
+    # Real time (ADR 0005): the WebSocket API is in this stack, so its id is a plain Ref (no CDK output);
+    # the functions build the management endpoint from it (Floci or AWS form).
+    RIDECORE_WS_API_ID: !Ref WebsocketsApi
+    RIDECORE_WS_STAGE: ${sls:stage}
   iam:
     role:
       statements:
@@ -50,6 +54,9 @@ provider:
             - sns:Publish
           Resource:
             - ${self:provider.environment.RIDECORE_OFFERS_TOPIC_ARN}
+        # No execute-api:ManageConnections statement here: osls adds one to the shared default role for
+        # any WebSocket API in the account (`execute-api:*:*:*/@connections/*`), and a narrower statement
+        # beside it would restrict nothing. Accepted with the one-role decision (ADR 0005).
 
 package:
   individually: false
@@ -114,3 +121,42 @@ functions:
           arn: ${env:RIDECORE_BILLING_QUEUE_ARN}
           batchSize: 10
           functionResponseType: ReportBatchItemFailures
+
+  # Trip events -> the sockets of the trip's passenger and driver (ADR 0005).
+  notifier:
+    handler: dist/notifier.handler
+    events:
+      - sqs:
+          arn: ${env:RIDECORE_NOTIFICATIONS_QUEUE_ARN}
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+
+  # WebSocket API: the client offers the subprotocol `ridecore.v1, <token>` (ADR 0005).
+  ws:
+    handler: dist/ws.handler
+    events:
+      - websocket:
+          route: $connect
+      - websocket:
+          route: $disconnect
+      - websocket:
+          route: $default
+
+  # Driver items from the same table stream (second mapping, its own filter) -> map pushes. Positions
+  # are best effort: a few retries, no failure destination; the next position supersedes a lost one.
+  positions:
+    handler: dist/positions.handler
+    events:
+      - stream:
+          type: dynamodb
+          arn: ${env:RIDECORE_TABLE_STREAM_ARN}
+          batchSize: 10
+          startingPosition: LATEST
+          maximumRetryAttempts: 3
+          functionResponseType: ReportBatchItemFailures
+          filterPatterns:
+            - eventName: [INSERT, MODIFY]
+              dynamodb:
+                NewImage:
+                  entity:
+                    S: [DRIVER]

@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { createDispatchConsumer } from '../../../src/events/consumers/dispatch.ts';
 import { createDriverOffersConsumer } from '../../../src/events/consumers/driver-offers.ts';
 import type { DriverOffer } from '../../../src/events/envelope.ts';
+import type { Actor } from '../../../src/domain/trip.ts';
 import type { LogLine } from '../../../src/log.ts';
+import type { ServerMessage } from '../../../src/realtime/messages.ts';
 
 const NOW = new Date('2026-11-10T12:00:00.000Z');
 
@@ -71,31 +73,61 @@ describe('dispatch consumer', () => {
 });
 
 describe('driver-offers consumer', () => {
-  it('logs the first delivery of an offer and flags later ones as duplicates', async () => {
-    const seen = new Set<string>();
+  const offerOf = (driverId = 'd1') =>
+    JSON.stringify({ schemaVersion: 1, offerId: `t1:${driverId}`, tripId: 't1', driverId, offeredAt: NOW.toISOString(), correlationId: 'c-1' });
+
+  function setup(outcome: 'sent' | 'gone' | Error = 'sent', sockets: string[] = ['dc']) {
+    const marked = new Set<string>();
     const logs: LogLine[] = [];
+    const pushed: [string, ServerMessage][] = [];
     const consumer = createDriverOffersConsumer({
       consumed: {
+        has: (consumer, eventId) => Promise.resolve(marked.has(`${consumer}/${eventId}`)),
         markOnce: (consumer, eventId) => {
           const key = `${consumer}/${eventId}`;
-          const first = !seen.has(key);
-          seen.add(key);
+          const first = !marked.has(key);
+          marked.add(key);
           return Promise.resolve(first);
+        },
+      },
+      connections: { byActor: async (a: Actor) => (a.role === 'driver' && a.id === 'd1' ? sockets : []), remove: async () => undefined },
+      pusher: {
+        send: async (id, m) => {
+          if (outcome instanceof Error) throw outcome;
+          if (outcome === 'sent') pushed.push([id, m]);
+          return outcome;
         },
       },
       log: (line) => logs.push(line),
       now: () => NOW,
     });
-    const offer = JSON.stringify({ schemaVersion: 1, offerId: 't1:d1', tripId: 't1', driverId: 'd1', offeredAt: NOW.toISOString() });
+    return { consumer, marked, logs, pushed };
+  }
 
-    expect(await consumer(sqs([offer, offer]))).toEqual({ batchItemFailures: [] });
-    expect(seen).toEqual(new Set(['driver-offers/t1:d1']));
+  it("pushes the first delivery of an offer to the driver's sockets and marks it; a duplicate is not pushed", async () => {
+    const { consumer, marked, logs, pushed } = setup();
+    expect(await consumer(sqs([offerOf(), offerOf()]))).toEqual({ batchItemFailures: [] });
+    expect(marked).toEqual(new Set(['driver-offers/t1:d1']));
+    expect(pushed).toEqual([['dc', { type: 'offer', schemaVersion: 1, offer: { offerId: 't1:d1', tripId: 't1', offeredAt: NOW.toISOString() } }]]);
     expect(logs.filter((l) => l.msg === 'offer received')).toHaveLength(1);
     expect(logs.filter((l) => l.msg === 'duplicate offer')).toHaveLength(1);
   });
 
+  it('leaves the offer unmarked when the push fails, so the retry pushes it', async () => {
+    const { consumer, marked } = setup(Object.assign(new Error('boom'), { name: 'InternalServerError' }));
+    expect(await consumer(sqs([offerOf()]))).toEqual({ batchItemFailures: [{ itemIdentifier: 'm1' }] });
+    expect(marked.size).toBe(0);
+  });
+
+  it('marks an offer for a driver with no open socket', async () => {
+    const { consumer, marked, pushed } = setup('sent', []);
+    expect(await consumer(sqs([offerOf()]))).toEqual({ batchItemFailures: [] });
+    expect(marked.size).toBe(1);
+    expect(pushed).toEqual([]);
+  });
+
   it('rejects a body that is not a DriverOffer v1', async () => {
-    const consumer = createDriverOffersConsumer({ consumed: { markOnce: () => Promise.resolve(true) }, log: () => undefined });
+    const { consumer } = setup();
     expect(await consumer(sqs(['{"schemaVersion":2}']))).toEqual({ batchItemFailures: [{ itemIdentifier: 'm1' }] });
   });
 });

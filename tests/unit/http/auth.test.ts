@@ -1,7 +1,7 @@
 import { SignJWT } from 'jose';
 import { describe, expect, it } from 'vitest';
 import { DomainError } from '../../../src/domain/errors.ts';
-import { signToken, verifyToken } from '../../../src/http/auth.ts';
+import { signToken, verifyRawToken, verifyToken } from '../../../src/http/auth.ts';
 
 const SECRET = 'unit-test-secret-unit-test-secret';
 const key = (s: string) => new TextEncoder().encode(s);
@@ -78,5 +78,28 @@ describe('auth tokens', () => {
       .setExpirationTime('1h')
       .sign(key(SECRET));
     await expect401(verifyToken(`Bearer ${noSub}`, SECRET));
+  });
+});
+
+describe('verifyRawToken (WebSocket $connect: the token without a Bearer header)', () => {
+  it('accepts a signed token', async () => {
+    const token = await signToken({ id: 'p-9', role: 'passenger' }, SECRET);
+    expect(await verifyRawToken(token, SECRET)).toEqual({ id: 'p-9', role: 'passenger' });
+  });
+
+  it('rejects an expired token, alg none, a wrong role and an empty string with 401', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const expired = await new SignJWT({ role: 'driver' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setSubject('d-1')
+      .setIssuedAt(now - 100)
+      .setExpirationTime(now - 10)
+      .sign(key(SECRET));
+    const none = `${b64({ alg: 'none', typ: 'JWT' })}.${b64({ sub: 'p-1', role: 'passenger', exp: now + 600 })}.`;
+    const admin = await new SignJWT({ role: 'admin' }).setProtectedHeader({ alg: 'HS256' }).setSubject('x').setExpirationTime(now + 600).sign(key(SECRET));
+    await expect401(verifyRawToken(expired, SECRET));
+    await expect401(verifyRawToken(none, SECRET));
+    await expect401(verifyRawToken(admin, SECRET));
+    await expect401(verifyRawToken('', SECRET));
   });
 });

@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive
+.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map
 
 # Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
 # this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
@@ -36,9 +36,12 @@ deploy-api: build
 	api_id=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's/^ *HttpApiId: *//p'); \
 	test -n "$$api_id" || { echo "HttpApiId not found in serverless info" >&2; exit 1; }; \
 	url="http://localhost:4567/_aws/execute-api/$$api_id/\$$default"; \
-	{ printf '%s\n' "$$cdk_env" | sed 's/^export //'; printf "RIDECORE_API_URL='%s'\n" "$$url"; } > .env.deploy; \
+	ws_url=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's|^ *ServiceEndpointWebsocket: *wss://\([a-z0-9]*\)\.[^/]*/\(.*\)$$|ws://\1.execute-api.localhost.floci.io:4567/\2|p'); \
+	test -n "$$ws_url" || { echo "ServiceEndpointWebsocket not found in serverless info" >&2; exit 1; }; \
+	{ printf '%s\n' "$$cdk_env" | sed 's/^export //'; printf "RIDECORE_API_URL='%s'\nRIDECORE_WS_URL='%s'\n" "$$url" "$$ws_url"; } > .env.deploy; \
 	curl -s -o /dev/null --max-time 30 "$$url/me/trips" || true; \
 	echo "API (Floci Lambda): $$url"; \
+	echo "WebSocket (Floci): $$ws_url"; \
 	echo "Wrote .env.deploy"
 
 build:
@@ -90,7 +93,18 @@ dlq-demo:
 	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
 	@$(LOAD_ENV) && node scripts/dlq-demo.ts
 
-# Move a DLQ's messages back to its queue: make redrive QUEUE=billing (or dispatch, driver-offers).
+# Move a DLQ's messages back to its queue: make redrive QUEUE=billing (or dispatch, driver-offers, notifications).
 redrive:
 	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
 	@$(LOAD_ENV) && node scripts/redrive.ts $(QUEUE)
+
+# Live map demo (ADR 0005): prints what to paste into demo/map.html, then drives the seeded cars
+# around small loops for SECONDS (default 120). Open the page in a browser while it runs.
+SECONDS ?= 120
+demo-map:
+	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
+	@$(LOAD_ENV) && \
+	echo "Open:            file://$(CURDIR)/demo/map.html" && \
+	echo "WebSocket URL:   $$RIDECORE_WS_URL" && \
+	echo "Passenger token: $$(node scripts/dev-token.ts passenger passenger-1)" && \
+	node scripts/move-drivers.ts --seconds $(SECONDS)

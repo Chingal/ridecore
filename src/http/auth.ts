@@ -26,6 +26,15 @@ export async function signToken(actor: Actor, secret: string, ttlSeconds = 86400
 export async function verifyToken(header: string | undefined, secret: string): Promise<Actor> {
   const token = header === undefined ? undefined : BEARER.exec(header)?.[1];
   if (token === undefined) throw unauthenticated('Missing or malformed bearer token');
+  return verifyRawToken(token, secret);
+}
+
+/**
+ * Verifies a bare token (the WebSocket `$connect` carries it in the subprotocol, not in a header).
+ * Same rules and 401 errors as `verifyToken`.
+ */
+export async function verifyRawToken(token: string, secret: string): Promise<Actor> {
+  if (token === '') throw unauthenticated('Missing or malformed bearer token');
   let payload;
   try {
     ({ payload } = await jwtVerify(token, keyOf(secret), { algorithms: [ALG] }));

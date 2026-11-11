@@ -16,6 +16,9 @@ const outputs = {
   BillingDlqUrl: 'http://q/billing-dlq',
   DriverOffersDlqUrl: 'http://q/driver-offers-dlq',
   PublisherFailuresQueueArn: 'arn:aws:sqs:us-east-1:000000000000:ridecore-publisher-failures',
+  NotificationsQueueArn: 'arn:aws:sqs:us-east-1:000000000000:ridecore-notifications',
+  NotificationsQueueUrl: 'http://q/notifications',
+  NotificationsDlqUrl: 'http://q/notifications-dlq',
 };
 
 describe('cdkEnv', () => {
@@ -35,6 +38,9 @@ describe('cdkEnv', () => {
       RIDECORE_BILLING_DLQ_URL: 'http://q/billing-dlq',
       RIDECORE_DRIVER_OFFERS_DLQ_URL: 'http://q/driver-offers-dlq',
       RIDECORE_PUBLISHER_FAILURES_QUEUE_ARN: outputs.PublisherFailuresQueueArn,
+      RIDECORE_NOTIFICATIONS_QUEUE_ARN: outputs.NotificationsQueueArn,
+      RIDECORE_NOTIFICATIONS_QUEUE_URL: 'http://q/notifications',
+      RIDECORE_NOTIFICATIONS_DLQ_URL: 'http://q/notifications-dlq',
     });
   });
 
@@ -45,7 +51,7 @@ describe('cdkEnv', () => {
   });
 
   it('has dummy outputs for packaging without a deploy', () => {
-    expect(Object.keys(cdkEnv(DUMMY_OUTPUTS))).toHaveLength(14);
+    expect(Object.keys(cdkEnv(DUMMY_OUTPUTS))).toHaveLength(17);
   });
 });
 

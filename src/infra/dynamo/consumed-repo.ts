@@ -1,5 +1,5 @@
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { type DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { type DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { consumedKey } from './keys.ts';
 import type { TransactWriteItem } from './transact.ts';
 
@@ -31,6 +31,14 @@ export class ConsumedRepo {
         ConditionExpression: 'attribute_not_exists(PK)',
       },
     };
+  }
+
+  /** Whether `consumer` already recorded the event (strongly consistent read). */
+  async has(consumer: string, eventId: string): Promise<boolean> {
+    const res = await this.doc.send(
+      new GetCommand({ TableName: this.tableName, Key: consumedKey(consumer, eventId), ConsistentRead: true }),
+    );
+    return res.Item !== undefined;
   }
 
   /** Records the event for `consumer`; false when it was already recorded (a duplicate delivery). */
