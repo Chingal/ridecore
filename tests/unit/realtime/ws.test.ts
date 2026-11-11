@@ -129,6 +129,13 @@ describe('$default', () => {
     expect(pushed.filter(([, m]) => m.type === 'car')).toHaveLength(1);
   });
 
+  it('the snapshot limit counts per passenger, not per socket (many sockets do not multiply it)', async () => {
+    stored.set('pc2', { connectionId: 'pc2', actor: PASSENGER, connectedAt: NOW.toISOString() });
+    await message('pc', { action: 'watch', ...POPAYAN });
+    await message('pc2', { action: 'watch', lat: 2.5, lng: -76.6 });
+    expect(pushed.filter(([, m]) => m.type === 'car')).toHaveLength(1);
+  });
+
   it('a driver may not watch; a passenger may not send positions', async () => {
     await message('dc', { action: 'watch', ...POPAYAN });
     await message('pc', { action: 'position', ...POPAYAN });
