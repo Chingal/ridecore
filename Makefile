@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map mcp-token coverage demo
+.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map mcp-token coverage demo load load-teardown
 
 # Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
 # this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
@@ -122,3 +122,14 @@ coverage:
 demo:
 	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
 	@$(LOAD_ENV) && node scripts/demo-trip.ts
+
+# Local load test (docs/load-testing.md): PROFILE=smoke|peak|spike|crowded. Floci on a laptop:
+# behaviour under concurrency, not AWS capacity. Teardown runs even when a step fails.
+PROFILE ?= smoke
+load:
+	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
+	@node --import ./scripts/load-env.ts scripts/load/run.ts $(PROFILE)
+
+# Ends the load actors' trips and sets their drivers OFFLINE, e.g. after an interrupted run.
+load-teardown:
+	@node --import ./scripts/load-env.ts scripts/load/actors.ts teardown
