@@ -28,11 +28,16 @@ The design spec (§7) asks for DynamoDB with the schema designed from access pat
 - **Everything about a trip shares its partition** (`TRIP#<id>`): the trip, its events, its offers and its billing record.
 - **The indexes are overloaded by prefix.** GSI1 holds passenger history, driver offers and sockets by actor. GSI2 holds available drivers and watched cells. The prefixes never overlap, so each query reads only its own kind.
 - **Availability is a sparse index.** A driver's `META` item carries the `GSI2` keys only while it is `AVAILABLE` and has a position. Going offline or taking a trip removes them, so the area query never sees a busy driver.
-- **Expiry is TTL plus a check.** DynamoDB deletes expired items lazily, so the code treats an item past `expiresAt` as absent before it is gone.
+- **Expiry is TTL.** DynamoDB deletes expired items lazily, sometimes long after `expiresAt`.
+  - **Idempotency records:** the code also checks `expiresAt`, so an expired key counts as absent at once.
+  - **Dedup records and connection items:** they can linger until DynamoDB deletes them. A very late duplicate is still skipped, and a push to a dead socket gets a 410 that removes its item (ADR 0005).
 
 ## Consequences
 
-- Each access pattern is one `GetItem` or one `Query`, and every multi-item change (a trip, its reservation, its event, an idempotency record) fits one `TransactWriteItems`. That is what ADR 0007 relies on.
+- Most access patterns are one `GetItem` or one `Query`. There are two exceptions:
+  - **Area search** runs one `Query` per cell: the cell and its 8 neighbours.
+  - **A driver's offers** are one `Query` and then a `BatchGetItem` of the trips.
+- Every multi-item change (a trip, its reservation, its event, an idempotency record) fits one `TransactWriteItems`. That is what ADR 0007 relies on.
 - The cost is readability. The key formats are only clear with `keys.ts` open, which is why every key in it is a named function and this table exists.
 - The stream now has two readers, the outbox publisher and the positions handler. That is the number AWS recommends as the maximum per stream. A third consumer would read from EventBridge, not from the stream.
 - Area search is coarse: geohash precision 5 (cells of a few kilometres) plus neighbours, then distance in code. That is enough for the spec ("coarse geohash prefix is acceptable"), but not for a dense city.

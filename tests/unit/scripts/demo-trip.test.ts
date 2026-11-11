@@ -11,6 +11,7 @@ type Req = { method: string; path: string; who: string; body: unknown };
 let requests: Req[];
 let printed: string[];
 let activeTrip: boolean;
+let leftoverState: string;
 let busyDriver: string | undefined;
 let offerAfterPolls: number;
 let fareAfterPolls: number;
@@ -48,8 +49,9 @@ function fakeFetch(): typeof fetch {
       }
       return reply(200, {});
     }
-    if (path === '/me/trips') return reply(200, { items: activeTrip ? [{ id: 'old-trip', state: 'ACCEPTED' }] : [] });
+    if (path === '/me/trips') return reply(200, { items: activeTrip ? [{ id: 'old-trip', state: leftoverState, driverId: 'driver-5' }] : [] });
     if (path === '/trips/old-trip/cancel') return reply(200, { id: 'old-trip', state: 'CANCELLED' });
+    if (path === '/trips/old-trip/complete') return reply(200, { id: 'old-trip', state: 'COMPLETED' });
     if (path === '/trips' && method === 'POST') return reply(201, trip());
     const step = /^\/trips\/trip-1\/(accept|arrive|start|complete|rating)$/.exec(path)?.[1];
     if (step !== undefined) {
@@ -73,6 +75,7 @@ beforeEach(() => {
   requests = [];
   printed = [];
   activeTrip = false;
+  leftoverState = 'ACCEPTED';
   busyDriver = undefined;
   offerAfterPolls = 2;
   fareAfterPolls = 2;
@@ -106,6 +109,34 @@ describe('runDemoTrip', () => {
     await run();
     expect(printed.join('\n')).toMatch(/driver-1.*on a trip/);
     expect(printed.join('\n')).toContain('RATED');
+  });
+
+  it("completes a leftover IN_PROGRESS trip as its driver (it cannot be cancelled) before requesting", async () => {
+    activeTrip = true;
+    leftoverState = 'IN_PROGRESS';
+    await run();
+    const complete = requests.findIndex((r) => r.path === '/trips/old-trip/complete');
+    expect(requests[complete]?.who).toBe('driver-5');
+    expect(requests.some((r) => r.path === '/trips/old-trip/cancel')).toBe(false);
+    expect(complete).toBeLessThan(requests.findIndex((r) => r.path === '/trips' && r.method === 'POST'));
+    expect(printed.join('\n')).toContain('RATED');
+  });
+
+  it("an unreachable API fails at once with one line that says to run 'make up'", async () => {
+    const refused = (async () => {
+      throw new TypeError('fetch failed');
+    }) as typeof fetch;
+    await expect(
+      runDemoTrip({ api: API, secret: SECRET, fetch: refused, print: (l) => void printed.push(l), sleep: async () => undefined }),
+    ).rejects.toThrow(/http:\/\/api\.test is not reachable.*make up/);
+  });
+
+  it('a request that hangs is cut by the request timeout, not left waiting', async () => {
+    const hanging = ((_url: string | URL, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal?.reason)))) as typeof fetch;
+    await expect(
+      runDemoTrip({ api: API, secret: SECRET, fetch: hanging, print: (l) => void printed.push(l), sleep: async () => undefined, requestTimeoutMs: 20 }),
+    ).rejects.toThrow(/did not answer within/);
   });
 
   it('gives up with a pointer to the dispatch queue when no offer arrives', async () => {

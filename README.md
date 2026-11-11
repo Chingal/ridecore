@@ -37,8 +37,8 @@ Delivery is at-least-once: every queue has a dead-letter queue, and every consum
   the first three states. Any other transition is rejected.
 - **HTTP API** for passengers and drivers: request, accept, arrive, start, complete, cancel and rate a trip;
   driver availability and position; a driver's open offers; a passenger's trip history.
-- **Dispatch by proximity:** available drivers in the same geohash cell (precision 5) or its neighbours get
-  the offer. When two drivers accept at the same time, one wins and the other gets `409 TRIP_ALREADY_TAKEN`.
+- **Dispatch by proximity:** the nearest five available drivers in the same geohash cell (precision 5) or its
+  neighbours get the offer (at most 20 offers per trip). When two drivers accept at the same time, one wins and the other gets `409 TRIP_ALREADY_TAKEN`.
 - **One active trip per passenger and per driver**, enforced atomically with DynamoDB transactions
   (`TransactWriteItems`), not with a read-then-write check.
 - **Transactional outbox:** every state change writes the trip and its versioned event (`schemaVersion: 1`)

@@ -15,6 +15,8 @@ export type DemoDeps = {
   print: (line: string) => void;
   sleep?: (ms: number) => Promise<void>;
   timeoutMs?: number;
+  /** Each HTTP request, headers and body included (default 10 s). */
+  requestTimeoutMs?: number;
 };
 
 const PASSENGER = 'passenger-1';
@@ -35,6 +37,7 @@ export async function runDemoTrip(deps: DemoDeps): Promise<void> {
   const doFetch = deps.fetch ?? fetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const timeoutMs = deps.timeoutMs ?? 60_000;
+  const requestTimeoutMs = deps.requestTimeoutMs ?? 10_000;
   const started = Date.now();
   const stamp = () => `[${((Date.now() - started) / 1000).toFixed(1).padStart(5)}s]`;
   const say = (line: string) => deps.print(`${stamp()} ${line}`);
@@ -49,16 +52,29 @@ export async function runDemoTrip(deps: DemoDeps): Promise<void> {
   const driver = (id: string): Actor => ({ id, role: 'driver' });
 
   async function call<T>(who: Actor, method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
-    const res = await doFetch(`${api}${path}`, {
+    const signal = AbortSignal.timeout(requestTimeoutMs);
+    const init: RequestInit = {
       method,
+      signal,
       headers: {
         authorization: `Bearer ${await tokenOf(who)}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         ...headers,
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    const parsed = (await res.json().catch(() => ({}))) as { error?: { code: string; message: string } };
+    };
+    let res: Response;
+    let parsed: { error?: { code: string; message: string } };
+    // The timeout covers headers and body; a refused connection or a stalled API is one clear line.
+    try {
+      res = await doFetch(`${api}${path}`, init);
+      const text = await res.text();
+      parsed = (text === '' ? {} : JSON.parse(text)) as typeof parsed;
+    } catch (err) {
+      if (signal.aborted) throw new Error(`${method} ${path}: the API at ${api} did not answer within ${requestTimeoutMs / 1000} s`, { cause: err });
+      if (err instanceof SyntaxError) throw new Error(`${method} ${path}: the API at ${api} answered with something that is not JSON`, { cause: err });
+      throw new Error(`The API at ${api} is not reachable: run 'make up' (or check RIDECORE_API_URL)`, { cause: err });
+    }
     if (!res.ok) throw new CallError(parsed.error?.code ?? `HTTP_${res.status}`, `${method} ${path}: ${parsed.error?.message ?? res.status}`);
     return parsed as T;
   }
@@ -85,10 +101,14 @@ export async function runDemoTrip(deps: DemoDeps): Promise<void> {
     }
   }
 
-  // 2. One active trip per passenger: cancel a leftover from an earlier run.
+  // 2. One active trip per passenger: end a leftover from an interrupted run. Cancelling is allowed up
+  //    to DRIVER_ARRIVED; a trip already IN_PROGRESS can only be completed, by its driver.
   const { items: history } = await call<{ items: Trip[] }>(passenger, 'GET', '/me/trips');
   const leftover = history.find((t) => ACTIVE.has(t.state));
-  if (leftover !== undefined) {
+  if (leftover !== undefined && leftover.state === 'IN_PROGRESS' && leftover.driverId !== undefined) {
+    await call(driver(leftover.driverId), 'POST', `/trips/${leftover.id}/complete`);
+    say(`completed ${PASSENGER}'s earlier trip ${leftover.id.slice(0, 8)}, left in progress (demo reset)`);
+  } else if (leftover !== undefined) {
     await call(passenger, 'POST', `/trips/${leftover.id}/cancel`, { reason: 'demo reset' });
     say(`cancelled ${PASSENGER}'s earlier trip ${leftover.id.slice(0, 8)} (demo reset)`);
   }
