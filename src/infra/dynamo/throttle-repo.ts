@@ -24,7 +24,7 @@ export class ThrottleRepo {
             ...throttleKey(scope, id),
             entity: 'THROTTLE',
             at: now.getTime(),
-            expiresAt: Math.floor(now.getTime() / 1000) + THROTTLE_TTL_SECONDS,
+            expiresAt: Math.floor((now.getTime() + windowMs) / 1000) + THROTTLE_TTL_SECONDS,
           },
           ConditionExpression: 'attribute_not_exists(PK) OR #at <= :cutoff',
           ExpressionAttributeNames: { '#at': 'at' },
