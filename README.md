@@ -109,6 +109,7 @@ Configuration is read in this order: exported env > `.env.local` (yours, git-ign
 | Integration | consumers' idempotency, "offer once" under concurrency, DLQ redrive, connection and throttle items | `npm run test:integration` |
 | End to end | a complete trip: the offer arrives only through the dispatch consumer, the fare only through billing; against the Floci-deployed Lambda and the local adapter | `make e2e`, `make e2e-local` |
 | End to end | real time over WebSocket: a car on the map, the offer pushed to the driver, trip updates to both, the car leaving the map, the driver's position only to the passenger | `make e2e` |
+| Load (local) | a rush hour with k6 against Floci (drivers moving, passengers watching and riding), then an invariant checker; behaviour under concurrency, not AWS capacity ([results](docs/load-testing.md)) | `make load PROFILE=peak` |
 | End to end | the MCP server as a child process over stdio: request, one active trip only, status, list, cancel; a driver token and another passenger's trip are refused | `make e2e`, `make e2e-local` |
 
 Unit-test coverage of `src/` (`make coverage`; integration and e2e tests are not counted): 61% of lines,
@@ -206,10 +207,12 @@ billing DLQ: 1 message(s). Move it back with: make redrive QUEUE=billing
   or index that serves it.
 - [ADR 0007 — Idempotency and locking](docs/decisions/0007-idempotency-and-locking.md): Idempotency-Key,
   optimistic locking, and one active trip per passenger and per driver, each as one conditional transaction.
+- [ADR 0008 — Scaling](docs/decisions/0008-scaling.md): what the local load test broke first (trip events behind
+  driver positions in one stream) and the changes, cheapest first.
 - [Design spec](docs/superpowers/specs/2026-11-09-ridecore-design.md) and the implementation plans:
   [core](docs/superpowers/plans/2026-11-09-ridecore-core.md), [events](docs/superpowers/plans/2026-11-10-ridecore-events.md),
   [real time](docs/superpowers/plans/2026-11-11-ridecore-realtime.md), [MCP](docs/superpowers/plans/2026-11-11-ridecore-mcp.md),
-  [README and demo](docs/superpowers/plans/2026-11-11-ridecore-readme.md).
+  [README and demo](docs/superpowers/plans/2026-11-11-ridecore-readme.md), [load](docs/superpowers/plans/2026-11-11-ridecore-load.md).
 
 ## Status and limitations
 
@@ -220,6 +223,8 @@ documentation with its demo.
 - An unaccepted trip waits until the passenger cancels: there is no expiry and no re-offer.
 - Auth is a minimal JWT stand-in, not production identity.
 - All functions share one IAM role (ADR 0004, ADR 0005).
+- Under a local rush hour, trip events wait behind driver positions in the table stream. On Floci they were
+  lost; on AWS they would be delayed ([ADR 0008](docs/decisions/0008-scaling.md)). The fixes are listed but not built.
 
 ## Background
 
