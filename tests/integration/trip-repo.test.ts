@@ -1,6 +1,7 @@
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runWithCorrelation } from '../../src/context.ts';
 import { DomainError } from '../../src/domain/errors.ts';
 import { toEvent } from '../../src/domain/events.ts';
 import { type Actor, type Trip, transition, type TripAction } from '../../src/domain/trip.ts';
@@ -85,6 +86,14 @@ describe('TripRepo (DynamoDB on Floci)', () => {
       eventId: `${trip.id}:1`,
     });
     expect(await repo.activeTripId('PASSENGER', trip.passengerId)).toBe(trip.id);
+  });
+
+  it('the outbox event carries the correlation id of the run that wrote it', async () => {
+    const inside = await runWithCorrelation('c-2', () => createTrip());
+    expect(await rawItem(`TRIP#${inside.id}`, 'EVENT#000001')).toMatchObject({ correlationId: 'c-2' });
+
+    const outside = await createTrip();
+    expect(await rawItem(`TRIP#${outside.id}`, 'EVENT#000001')).not.toHaveProperty('correlationId');
   });
 
   it('get returns null for an unknown trip', async () => {

@@ -1,3 +1,4 @@
+import { runWithCorrelation } from '../context.ts';
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { randomUUID } from 'node:crypto';
 import type { DriverService } from '../app/drivers.ts';
@@ -144,7 +145,7 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
     const line: LogLine = { level: 'info', msg: 'request', correlationId, method, path };
     let response: APIGatewayProxyStructuredResultV2;
     try {
-      const out = await route(event, method, path);
+      const out = await runWithCorrelation(correlationId, () => route(event, method, path));
       response = json(out.status, out.body, correlationId, out.headers);
     } catch (err) {
       const info = toErrorInfo(err);

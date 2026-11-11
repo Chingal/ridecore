@@ -1,3 +1,4 @@
+import { currentCorrelationId } from '../../context.ts';
 import { BatchGetCommand, type DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { TripEvent } from '../../domain/events.ts';
 import type { Trip } from '../../domain/trip.ts';
@@ -35,6 +36,12 @@ const CONFLICTS = {
   tripExists: { code: 'TRIP_ALREADY_EXISTS', message: 'A trip with this id already exists', priority: 3 },
   other: CONCURRENT_UPDATE,
 } satisfies Record<string, Conflict>;
+
+/** The current request's correlation id as an outbox attribute, or nothing outside a request. */
+function correlation(): { correlationId?: string } {
+  const correlationId = currentCorrelationId();
+  return correlationId === undefined ? {} : { correlationId };
+}
 
 const BATCH_GET_MAX_KEYS = 100;
 const BATCH_GET_MAX_ATTEMPTS = 5;
@@ -205,7 +212,7 @@ export class TripRepo {
     return {
       Put: {
         TableName: this.tableName,
-        Item: { ...event, ...outboxKey(event.tripId, event.version), entity: 'EVENT' },
+        Item: { ...event, ...correlation(), ...outboxKey(event.tripId, event.version), entity: 'EVENT' },
         ConditionExpression: 'attribute_not_exists(PK)',
       },
     };

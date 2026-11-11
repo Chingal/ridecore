@@ -1,4 +1,4 @@
-import { type DynamoDBDocumentClient, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { type DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -607,6 +607,19 @@ describe('errors and logging', () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({ level: 'error', code: 'INTERNAL', status: 500, path: '/me/trips' });
     expect(String(logs[0]?.stack)).toContain('boom: secret internals');
+  });
+
+  it('the correlation id of the request reaches the outbox event', async () => {
+    const api = createHandler(deps());
+    const passenger = await person('passenger');
+    const res = await send(api, 'POST', '/trips', {
+      token: passenger.token,
+      headers: { 'x-correlation-id': 'corr-outbox-1', 'idempotency-key': randomUUID() },
+      body: { origin: POPAYAN, destination: CALI },
+    });
+    expect(res.status).toBe(201);
+    const outbox = await doc.send(new GetCommand({ TableName: table, Key: { PK: `TRIP#${tripOf(res).id}`, SK: 'EVENT#000001' } }));
+    expect(outbox.Item).toMatchObject({ correlationId: 'corr-outbox-1', type: 'trip.requested' });
   });
 
   it('one JSON log line per request with the correlation id; never the token or the body', async () => {
