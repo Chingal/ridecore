@@ -1,11 +1,14 @@
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import type { SQSRecord } from 'aws-lambda';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDispatch, type Dispatch } from '../../src/app/dispatch.ts';
+import { createBillingConsumer } from '../../src/events/consumers/billing.ts';
 import { DomainError } from '../../src/domain/errors.ts';
-import { toEvent } from '../../src/domain/events.ts';
+import { toEvent, type TripEvent } from '../../src/domain/events.ts';
 import { type LatLng, type Trip, transition } from '../../src/domain/trip.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
+import { BillingRepo } from '../../src/infra/dynamo/billing-repo.ts';
 import { ConsumedRepo } from '../../src/infra/dynamo/consumed-repo.ts';
 import { DriverRepo } from '../../src/infra/dynamo/driver-repo.ts';
 import { TripRepo } from '../../src/infra/dynamo/trip-repo.ts';
@@ -149,5 +152,60 @@ describe('ConsumedRepo (DynamoDB on Floci)', () => {
       new GetCommand({ TableName: table, Key: { PK: 'CONSUMED#driver-offers', SK: `EVENT#${eventId}` }, ConsistentRead: true }),
     );
     expect(item.Item?.expiresAt).toBe(Math.floor(BASE.getTime() / 1000) + 7 * 24 * 60 * 60);
+  });
+});
+
+describe('billing (DynamoDB on Floci)', () => {
+  const completed = (tripId: string, extra: Record<string, unknown> = {}): TripEvent => ({
+    schemaVersion: 1,
+    eventId: `${tripId}:5`,
+    type: 'trip.completed',
+    tripId,
+    version: 5,
+    occurredAt: '2026-11-10T12:30:00.000Z',
+    payload: { fromState: 'IN_PROGRESS', toState: 'COMPLETED', passengerId: 'p-1', driverId: 'd-1', fareEstimate: 7000, finalFare: 7200 },
+    ...extra,
+  });
+
+  it('records the final fare once; the same event again is a duplicate', async () => {
+    const billing = new BillingRepo(doc, table, consumed);
+    const tripId = randomUUID();
+    expect(await billing.record(completed(tripId), BASE)).toBe('recorded');
+    expect(await billing.record(completed(tripId), BASE)).toBe('duplicate');
+    expect(await billing.get(tripId)).toEqual({
+      tripId,
+      passengerId: 'p-1',
+      driverId: 'd-1',
+      finalFare: 7200,
+      completedAt: '2026-11-10T12:30:00.000Z',
+      eventId: `${tripId}:5`,
+    });
+  });
+
+  it('a trip.completed event without a final fare is rejected (it goes to the DLQ path)', async () => {
+    const billing = new BillingRepo(doc, table, consumed);
+    const tripId = randomUUID();
+    const event = completed(tripId);
+    const payload = { ...event.payload };
+    delete payload.finalFare;
+    await expect(billing.record({ ...event, payload }, BASE)).rejects.toThrow(/finalFare/);
+    expect(await billing.get(tripId)).toBeNull();
+  });
+
+  it('the consumer records trip.completed and acknowledges other event types without a record', async () => {
+    const billing = new BillingRepo(doc, table, consumed);
+    const consumer = createBillingConsumer({ billing, log: () => undefined, now: () => BASE });
+    const done = randomUUID();
+    const other = randomUUID();
+    const body = (event: TripEvent) => JSON.stringify({ source: 'ridecore.trips', 'detail-type': event.type, detail: event });
+    const res = await consumer({
+      Records: [
+        { messageId: 'm1', body: body(completed(done)) },
+        { messageId: 'm2', body: body({ ...completed(other), type: 'trip.rated' }) },
+      ] as SQSRecord[],
+    });
+    expect(res).toEqual({ batchItemFailures: [] });
+    expect((await billing.get(done))?.finalFare).toBe(7200);
+    expect(await billing.get(other)).toBeNull();
   });
 });

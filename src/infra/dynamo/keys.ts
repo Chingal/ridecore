@@ -111,3 +111,6 @@ export const idempotencyKey = (role: string, subject: string, key: string) => ({
 
 /** Dedup record of one event handled by one consumer (ADR 0004). */
 export const consumedKey = (consumer: string, eventId: string) => ({ PK: `CONSUMED#${consumer}`, SK: `EVENT#${eventId}` });
+
+/** The billing record of a completed trip (written by the billing consumer). */
+export const billingKey = (tripId: string) => ({ PK: `TRIP#${tripId}`, SK: 'BILLING' });
