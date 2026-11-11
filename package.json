@@ -17,7 +17,8 @@
     "build": "node scripts/build.ts",
     "dev": "node --import ./scripts/load-env.ts src/local/server.ts",
     "seed": "node --import ./scripts/load-env.ts scripts/seed.ts",
-    "package": "npm run build && eval \"$(node scripts/load-env.ts --print)\" && serverless package"
+    "package": "npm run build && eval \"$(node scripts/load-env.ts --print)\" && serverless package",
+    "mcp": "node --import ./scripts/load-env.ts src/mcp/main.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -42,6 +43,7 @@
     "@aws-sdk/client-sqs": "^3.1166.0",
     "@aws-sdk/lib-dynamodb": "^3.1165.0",
     "@aws-sdk/util-dynamodb": "^3.996.9",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "jose": "^6.2.17",
     "ngeohash": "^0.6.3",
     "zod": "^4.6.7"

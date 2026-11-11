@@ -4,9 +4,9 @@ The backend core of a ride-hailing service: passengers request trips, drivers ac
 Node.js + TypeScript on AWS serverless (Lambda, DynamoDB), built to be read in one sitting and run locally
 with one command, with no AWS account and no cost.
 
-> Status: **work in progress.** The trip API, its data model (Plan 1), the event path with its
-> consumers (Plan 2a) and real-time updates over WebSocket (Plan 2b) are built and tested. The MCP
-> server for AI agents is designed but not built yet (see [Roadmap](#roadmap)).
+> Status: the trip API and its data model (Plan 1), the event path with its consumers (Plan 2a),
+> real-time updates over WebSocket (Plan 2b) and the MCP server for AI agents (Plan 3) are built and
+> tested. See [Roadmap](#roadmap) for what is left.
 
 ## What it does today
 
@@ -36,6 +36,10 @@ with one command, with no AWS account and no cost.
   and passengers watching the map see available cars nearby (parked cars on opening, then their moves, throttled by geohash cell). Once a driver is
   on a trip, their position goes only to that trip's passenger. Pushes are driven by the events above; the
   real-time layer never writes trip state.
+- **MCP server for AI agents** ([ADR 0003](docs/decisions/0003-mcp-tool-design.md)): four passenger tools
+  (`request_trip`, `get_trip_status`, `cancel_trip`, `list_my_trips`) over stdio. It calls the HTTP API with
+  one passenger token, so the API's authorization applies unchanged, and returns short trip summaries and
+  readable errors such as `ACTIVE_TRIP_EXISTS: The passenger already has an active trip`.
 - Structured JSON logs; every response carries an `x-correlation-id` header, and the same id travels in
   the event to every consumer's log lines.
 
@@ -70,6 +74,7 @@ with one command, with no AWS account and no cost.
 - `src/infra/dynamo` — repositories, single-table keys, transactions, idempotency and dedup stores.
 - `src/events` — the outbox publisher, the SQS consumer harness and the consumers (dispatch, driver offers, billing, notifier).
 - `src/realtime` — WebSocket routes, the message contract, the pusher and the positions stream handler.
+- `src/mcp` — the MCP server: an HTTP client for the passenger routes, the four tools, the stdio entry point.
 - `infra/cdk` — the stateful stack in AWS CDK: table, event bus, rules, SNS topic, queues and DLQs.
 - `serverless.yml` — the Lambdas (API, publisher, consumers, WebSocket routes, positions) and their triggers, deployed with `osls`
   (the MIT fork of Serverless Framework). It reads the CDK outputs one way only (`scripts/cdk-env.ts`).
@@ -101,6 +106,7 @@ Configuration is read in this order: exported env > `.env.local` (yours, git-ign
 | Integration | consumers' idempotency, "offer once" under concurrency, DLQ redrive, connection and throttle items | `npm run test:integration` |
 | End to end | a complete trip: the offer arrives only through the dispatch consumer, the fare only through billing; against the Floci-deployed Lambda and the local adapter | `make e2e`, `make e2e-local` |
 | End to end | real time over WebSocket: a car on the map, the offer pushed to the driver, trip updates to both, the car leaving the map, the driver's position only to the passenger | `make e2e` |
+| End to end | the MCP server as a child process over stdio: request, one active trip only, status, list, cancel; a driver token and another passenger's trip are refused | `make e2e`, `make e2e-local` |
 
 GitHub Actions runs lint, type checks, unit tests, `cdk synth`, `serverless package`, a dependency audit,
 and then integration and e2e tests against Floci. CI needs no secrets and no AWS account. What e2e proves
@@ -112,6 +118,35 @@ only checked by synthesis and packaging.
 `make demo-map` prints the WebSocket URL and a passenger token. It then drives the six seeded cars around
 small loops for two minutes. Open `demo/map.html` (Leaflet + OpenStreetMap), paste both values and press
 Connect: the cars move, and any trip that passenger requests shows its state changes as they happen.
+
+## Use it from an AI agent
+
+The MCP server runs on your machine and talks to the agent over stdio. It needs the API URL
+(`RIDECORE_API_URL`, written to `.env.deploy` by `make up`; or `http://localhost:3000` with `make dev`)
+and a passenger token (`make mcp-token` prints one for the seeded `passenger-1`; `PASSENGER=<id>` for another).
+
+With [Claude Code](https://code.claude.com), from the repository root:
+
+```bash
+claude mcp add ridecore --env RIDECORE_MCP_TOKEN="$(make -s mcp-token)" \
+  -- node --import "$PWD/scripts/load-env.ts" "$PWD/src/mcp/main.ts"
+```
+
+That uses the API in Floci (`RIDECORE_API_URL` from `.env.deploy`). To use the local server of `make dev`
+instead, add `--env RIDECORE_API_URL=http://localhost:3000` before the `--`.
+
+The command is `node` and not `npm run mcp`, because npm prints a banner to stdout and stdout carries only
+the protocol. Any MCP client that starts a stdio server works the same way. Then ask, for example, *"Request
+a trip from 2.4448, -76.6147 to 2.4594, -76.5996 and tell me its status"*: the agent calls `request_trip`
+and gets back
+
+```json
+{"tripId":"…","state":"REQUESTED","origin":{"lat":2.4448,"lng":-76.6147},"destination":{"lat":2.4594,"lng":-76.5996},
+ "fareEstimate":8202,"currency":"COP","driverAssigned":false,"createdAt":"…","timestamps":{"REQUESTED":"…"}}
+```
+
+The token is a 24-hour dev token; when it expires the tools answer `UNAUTHENTICATED` and you add the server
+again with a new one.
 
 ## Watch an event fail and recover
 
@@ -150,8 +185,7 @@ billing DLQ: 1 message(s). Move it back with: make redrive QUEUE=billing
 
 1. ~~**Events (Plan 2a):** outbox publisher, SQS consumers with DLQs, SNS fan-out, redrive demo.~~ Done.
 2. ~~**Real time (Plan 2b):** WebSocket API, trip updates, offers, cars on the map, demo map page.~~ Done.
-3. **MCP server (Plan 3):** lets an AI agent request a trip, check its status, cancel it and list the
-   passenger's trips through the real API ([ADR 0003](docs/decisions/0003-mcp-tool-design.md)).
+3. ~~**MCP server (Plan 3):** four passenger tools for AI agents over the real API.~~ Done.
 
 Known limitations: only `STANDARD` trips (fare by straight-line distance); an unaccepted trip waits until the
 passenger cancels (no expiry or re-offer); auth is a minimal JWT stand-in, not production identity.
