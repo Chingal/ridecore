@@ -1,0 +1,6 @@
+{
+  "smoke": { "drivers": 5, "passengers": 10, "watchers": 5, "rampSeconds": 5, "durationSeconds": 45, "spikeAtSeconds": null, "thresholds": true },
+  "peak": { "drivers": 100, "passengers": 200, "watchers": 100, "rampSeconds": 120, "durationSeconds": 300, "spikeAtSeconds": null, "thresholds": true },
+  "spike": { "drivers": 100, "passengers": 200, "watchers": 100, "rampSeconds": 10, "durationSeconds": 180, "spikeAtSeconds": 60, "thresholds": true },
+  "crowded": { "drivers": 20, "passengers": 600, "watchers": 600, "rampSeconds": 30, "durationSeconds": 120, "spikeAtSeconds": null, "thresholds": false }
+}

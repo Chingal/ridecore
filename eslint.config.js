@@ -9,4 +9,11 @@ export default tseslint.config(
     files: ['src/**/*.ts'],
     rules: { '@typescript-eslint/no-explicit-any': 'error' },
   },
+  {
+    // k6 scripts (load/): k6's own globals and timers.
+    files: ['load/**/*.js'],
+    languageOptions: {
+      globals: { __ENV: 'readonly', __VU: 'readonly', open: 'readonly', setTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly', clearTimeout: 'readonly' },
+    },
+  },
 );
