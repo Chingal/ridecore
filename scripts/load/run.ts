@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { createDynamoClient } from '../../src/infra/dynamo/client.ts';
+import { locationPreflight } from '../location.ts';
 
 /**
  * `make load PROFILE=...` (docs/load-testing.md): setup -> DLQ baseline -> k6 -> invariant check,
@@ -27,6 +28,15 @@ for (const name of ['RIDECORE_TABLE', 'RIDECORE_API_URL', 'RIDECORE_WS_URL']) {
     process.exit(1);
   }
 }
+
+// The Go path (LOCATION=1): ridecore-location must answer before any actor is created.
+const locationError = await locationPreflight(process.env);
+if (locationError !== null) {
+  console.error(locationError);
+  process.exit(1);
+}
+const goPath = process.env.LOCATION === '1';
+if (goPath) console.log(`load: Go path, positions and map through ridecore-location (${process.env.RIDECORE_LOCATION_WS_URL})`);
 
 const node = (script: string, ...args: string[]) =>
   spawnSync(process.execPath, ['--import', './scripts/load-env.ts', script, ...args], { stdio: 'inherit' }).status ?? 1;
@@ -55,7 +65,8 @@ try {
     const k6 = spawnSync(
       'docker',
       ['run', '--rm', '--name', K6_CONTAINER, '--user', uid, '--network', 'host', '-v', `${process.cwd()}/load:/load:ro`, '-v', `${process.cwd()}/.load:/data`,
-        K6_IMAGE, 'run', '--quiet', '-e', `API=${process.env.RIDECORE_API_URL}`, '-e', `WS=${process.env.RIDECORE_WS_URL}`, '-e', `PROFILE=${profileName}`, '/load/rush-hour.js'],
+        K6_IMAGE, 'run', '--quiet', '-e', `API=${process.env.RIDECORE_API_URL}`, '-e', `WS=${process.env.RIDECORE_WS_URL}`, '-e', `PROFILE=${profileName}`,
+        ...(goPath ? ['-e', `LOC_WS=${process.env.RIDECORE_LOCATION_WS_URL}`] : []), '/load/rush-hour.js'],
       { stdio: 'inherit' },
     );
     step('k6', k6.status ?? 1);
