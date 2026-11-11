@@ -21,6 +21,7 @@ const MAPPING = {
   DispatchDlqUrl: 'RIDECORE_DISPATCH_DLQ_URL',
   BillingDlqUrl: 'RIDECORE_BILLING_DLQ_URL',
   DriverOffersDlqUrl: 'RIDECORE_DRIVER_OFFERS_DLQ_URL',
+  PublisherFailuresQueueArn: 'RIDECORE_PUBLISHER_FAILURES_QUEUE_ARN',
 } as const;
 
 const ACCOUNT = 'arn:aws:%s:us-east-1:000000000000:';
@@ -42,6 +43,7 @@ export const DUMMY_OUTPUTS: Record<keyof typeof MAPPING, string> = {
   DispatchDlqUrl: url('ridecore-dispatch-dlq'),
   BillingDlqUrl: url('ridecore-billing-dlq'),
   DriverOffersDlqUrl: url('ridecore-driver-offers-dlq'),
+  PublisherFailuresQueueArn: arn('sqs', 'ridecore-publisher-failures'),
 };
 
 export function cdkEnv(outputs: Record<string, string>): Record<string, string> {

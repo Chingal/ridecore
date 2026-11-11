@@ -42,6 +42,11 @@ provider:
             - !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/${self:provider.environment.RIDECORE_EVENT_BUS}
         - Effect: Allow
           Action:
+            - sqs:SendMessage
+          Resource:
+            - ${env:RIDECORE_PUBLISHER_FAILURES_QUEUE_ARN}
+        - Effect: Allow
+          Action:
             - sns:Publish
           Resource:
             - ${self:provider.environment.RIDECORE_OFFERS_TOPIC_ARN}
@@ -72,6 +77,12 @@ functions:
           maximumRetryAttempts: 10
           bisectBatchOnFunctionError: true
           functionResponseType: ReportBatchItemFailures
+          # After the retries, the failed records' location goes to this CDK queue instead of being
+          # dropped silently (ADR 0004): an outbox event is never lost without a trace.
+          destinations:
+            onFailure:
+              arn: ${env:RIDECORE_PUBLISHER_FAILURES_QUEUE_ARN}
+              type: sqs
           filterPatterns:
             - eventName: [INSERT]
               dynamodb:

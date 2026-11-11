@@ -15,6 +15,7 @@ const outputs = {
   DispatchDlqUrl: 'http://q/dispatch-dlq',
   BillingDlqUrl: 'http://q/billing-dlq',
   DriverOffersDlqUrl: 'http://q/driver-offers-dlq',
+  PublisherFailuresQueueArn: 'arn:aws:sqs:us-east-1:000000000000:ridecore-publisher-failures',
 };
 
 describe('cdkEnv', () => {
@@ -33,6 +34,7 @@ describe('cdkEnv', () => {
       RIDECORE_DISPATCH_DLQ_URL: 'http://q/dispatch-dlq',
       RIDECORE_BILLING_DLQ_URL: 'http://q/billing-dlq',
       RIDECORE_DRIVER_OFFERS_DLQ_URL: 'http://q/driver-offers-dlq',
+      RIDECORE_PUBLISHER_FAILURES_QUEUE_ARN: outputs.PublisherFailuresQueueArn,
     });
   });
 
@@ -43,7 +45,7 @@ describe('cdkEnv', () => {
   });
 
   it('has dummy outputs for packaging without a deploy', () => {
-    expect(Object.keys(cdkEnv(DUMMY_OUTPUTS))).toHaveLength(13);
+    expect(Object.keys(cdkEnv(DUMMY_OUTPUTS))).toHaveLength(14);
   });
 });
 

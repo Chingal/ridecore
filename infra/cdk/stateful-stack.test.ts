@@ -54,7 +54,7 @@ describe('StatefulStack', () => {
   });
 
   it('defines each consumer queue with a DLQ: 3 receives, 60 s visibility, 14-day DLQ retention', () => {
-    template.resourceCountIs('AWS::SQS::Queue', 6);
+    template.resourceCountIs('AWS::SQS::Queue', 7);
     for (const name of ['ridecore-dispatch', 'ridecore-billing', 'ridecore-driver-offers']) {
       template.hasResourceProperties('AWS::SQS::Queue', { QueueName: `${name}-dlq`, MessageRetentionPeriod: 1209600 });
       template.hasResourceProperties('AWS::SQS::Queue', {
@@ -86,6 +86,11 @@ describe('StatefulStack', () => {
       RawMessageDelivery: true,
       Endpoint: { 'Fn::GetAtt': [Match.stringLikeRegexp('^DriverOffersQueue'), 'Arn'] },
     });
+  });
+
+  it('keeps stream records the publisher could not deliver in a 14-day failure queue', () => {
+    template.hasResourceProperties('AWS::SQS::Queue', { QueueName: 'ridecore-publisher-failures', MessageRetentionPeriod: 1209600 });
+    template.hasOutput('PublisherFailuresQueueArn', {});
   });
 
   it('outputs everything the functions and scripts read', () => {

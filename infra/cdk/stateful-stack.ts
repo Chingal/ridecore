@@ -78,6 +78,14 @@ export class StatefulStack extends Stack {
     const offers = new Topic(this, 'OffersTopic', { topicName: OFFERS_TOPIC_NAME });
     offers.addSubscription(new SqsSubscription(driverOffers, { rawMessageDelivery: true }));
 
+    // Stream records the publisher could not deliver after its retries (osls on-failure destination):
+    // Lambda sends their shard/sequence range here, so lost outbox events can be found and replayed.
+    const publisherFailures = new Queue(this, 'PublisherFailures', {
+      queueName: 'ridecore-publisher-failures',
+      retentionPeriod: DLQ_RETENTION,
+    });
+    new CfnOutput(this, 'PublisherFailuresQueueArn', { value: publisherFailures.queueArn });
+
     new CfnOutput(this, 'EventBusName', { value: bus.eventBusName });
     new CfnOutput(this, 'OffersTopicArn', { value: offers.topicArn });
     new CfnOutput(this, 'TableName', { value: this.table.tableName });
