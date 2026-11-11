@@ -3,7 +3,7 @@ import type { DriverService } from '../app/drivers.ts';
 import type { DriverRepo } from '../infra/dynamo/driver-repo.ts';
 import { DomainError } from '../domain/errors.ts';
 import { verifyRawToken } from '../http/auth.ts';
-import { createDeps, jwtSecretFromEnv, services } from '../http/deps.ts';
+import { createDeps, jwtSecretFromEnv, locationFromEnv, services } from '../http/deps.ts';
 import { createDocumentClient } from '../infra/dynamo/client.ts';
 import { ConnectionRepo } from '../infra/dynamo/connection-repo.ts';
 import { cellOf } from '../infra/dynamo/driver-repo.ts';
@@ -143,7 +143,7 @@ export const handler = (event: WsEvent): Promise<WsResult> => {
     const doc = createDocumentClient();
     const table = tableNameFromEnv();
     const secret = jwtSecretFromEnv();
-    const deps = createDeps({ doc, table, jwtSecret: secret });
+    const deps = createDeps({ doc, table, jwtSecret: secret, location: locationFromEnv() });
     lambda = createWsHandler({
       connections: new ConnectionRepo(doc, table),
       drivers: services(deps).drivers,

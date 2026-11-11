@@ -5,6 +5,7 @@ import { createTripService, type TripService } from '../app/trips.ts';
 import { createDocumentClient } from '../infra/dynamo/client.ts';
 import { DriverRepo } from '../infra/dynamo/driver-repo.ts';
 import { IdempotencyRepo } from '../infra/dynamo/idempotency-repo.ts';
+import { createLocationClient, createLocationNearby } from '../infra/location/client.ts';
 import { TripRepo } from '../infra/dynamo/trip-repo.ts';
 import { jsonLog, type Logger } from '../log.ts';
 
@@ -29,7 +30,11 @@ export type DepsOptions = {
   jwtSecret: string;
   now?: () => Date;
   log?: Logger;
+  /** ridecore-location (RIDECORE_LOCATION_URL); null or absent keeps dispatch on the DynamoDB index. */
+  location?: LocationConfig | null;
 };
+
+export type LocationConfig = { url: string; key: string };
 
 export function createDeps(opts: DepsOptions): Deps {
   const now = opts.now ?? (() => new Date());
@@ -39,12 +44,31 @@ export function createDeps(opts: DepsOptions): Deps {
   return {
     trips,
     drivers,
-    dispatch: createDispatch({ trips, drivers }),
+    dispatch: createDispatch({ trips, drivers, ...nearbyOption(opts.location, drivers) }),
     idempotency: new IdempotencyRepo(opts.doc, opts.table, () => now().getTime(), log),
     jwtSecret: opts.jwtSecret,
     now,
     log,
   };
+}
+
+/** The dispatch option for ridecore-location, or nothing (today's behaviour) when it is off. */
+export function nearbyOption(location: LocationConfig | null | undefined, drivers: DriverRepo) {
+  return location ? { nearby: createLocationNearby(createLocationClient(location), drivers) } : {};
+}
+
+/**
+ * The ridecore-location switch. `RIDECORE_LOCATION_URL` unset or blank: off (null), and ridecore
+ * behaves exactly as without the service. Set: `RIDECORE_LOCATION_KEY` (the service's internal key,
+ * at least MIN_JWT_SECRET_LENGTH characters) is required; errors name the variable, never its value.
+ */
+export function locationFromEnv(env: NodeJS.ProcessEnv = process.env): LocationConfig | null {
+  const url = env.RIDECORE_LOCATION_URL?.trim();
+  if (!url) return null;
+  const key = env.RIDECORE_LOCATION_KEY;
+  if (key === undefined || key === '') throw new Error('RIDECORE_LOCATION_KEY is not set (required with RIDECORE_LOCATION_URL)');
+  if (key.length < MIN_JWT_SECRET_LENGTH) throw new Error(`RIDECORE_LOCATION_KEY must be at least ${MIN_JWT_SECRET_LENGTH} characters`);
+  return { url, key };
 }
 
 /** Shortest HS256 secret accepted from the environment (256 bits of key material at one byte per char). */
@@ -68,7 +92,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): Deps {
   const table = env.RIDECORE_TABLE;
   if (!table) throw new Error('RIDECORE_TABLE is not set');
   const jwtSecret = jwtSecretFromEnv(env);
-  return createDeps({ doc: createDocumentClient(), table, jwtSecret });
+  return createDeps({ doc: createDocumentClient(), table, jwtSecret, location: locationFromEnv(env) });
 }
 
 /** The use cases wired to `deps`. Cheap: plain closures over the repositories. */
