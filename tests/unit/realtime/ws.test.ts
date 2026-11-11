@@ -7,7 +7,7 @@ import type { Connection } from '../../../src/infra/dynamo/connection-repo.ts';
 import { cellOf } from '../../../src/infra/dynamo/driver-repo.ts';
 import type { LogLine } from '../../../src/log.ts';
 import type { ServerMessage } from '../../../src/realtime/messages.ts';
-import { createWsHandler, SUBPROTOCOL, type WsEvent } from '../../../src/realtime/ws.ts';
+import { createWsHandler, SUBPROTOCOL, WATCH_SNAPSHOT_WINDOW_MS, type WsEvent } from '../../../src/realtime/ws.ts';
 
 const SECRET = 'unit-test-secret-unit-test-secret';
 const NOW = new Date('2026-11-11T12:00:00.000Z');
@@ -21,6 +21,7 @@ let positions: [Actor, LatLng][];
 let pushed: [string, ServerMessage][];
 let logs: LogLine[];
 let positionError: Error | undefined;
+let snapshots: Map<string, number>;
 
 const handler = () =>
   createWsHandler({
@@ -43,6 +44,15 @@ const handler = () =>
       },
     },
     pusher: { send: async (id, m) => (pushed.push([id, m]), 'sent') },
+    throttle: {
+      once: async (scope, id, at, windowMs) => {
+        const key = `${scope}/${id}`;
+        const last = snapshots.get(key);
+        if (last !== undefined && at.getTime() - last < windowMs) return false;
+        snapshots.set(key, at.getTime());
+        return true;
+      },
+    },
     secret: SECRET,
     log: (line) => void logs.push(line),
     now: () => NOW,
@@ -64,6 +74,7 @@ beforeEach(() => {
   pushed = [];
   logs = [];
   positionError = undefined;
+  snapshots = new Map();
 });
 
 describe('$connect', () => {
@@ -108,6 +119,14 @@ describe('$default', () => {
     expect(watched).toEqual([['pc', cellOf(POPAYAN)]]);
     expect(pushed).toEqual([['pc', { type: 'car', schemaVersion: 1, driverId: 'd7', category: 'STANDARD', position: POPAYAN, at: NOW.toISOString() }]]);
     expect(JSON.stringify(pushed)).not.toMatch(/Secret Name|PLATE7/);
+  });
+
+  it(`sends the parked-cars snapshot at most once per connection every ${WATCH_SNAPSHOT_WINDOW_MS} ms (no sweeping the city)`, async () => {
+    expect(WATCH_SNAPSHOT_WINDOW_MS).toBe(10_000);
+    await message('pc', { action: 'watch', ...POPAYAN });
+    await message('pc', { action: 'watch', lat: 2.5, lng: -76.6 });
+    expect(watched).toHaveLength(2);
+    expect(pushed.filter(([, m]) => m.type === 'car')).toHaveLength(1);
   });
 
   it('a driver may not watch; a passenger may not send positions', async () => {

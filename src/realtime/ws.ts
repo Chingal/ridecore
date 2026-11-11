@@ -8,6 +8,7 @@ import { createDocumentClient } from '../infra/dynamo/client.ts';
 import { ConnectionRepo } from '../infra/dynamo/connection-repo.ts';
 import { cellOf } from '../infra/dynamo/driver-repo.ts';
 import { tableNameFromEnv } from '../infra/dynamo/keys.ts';
+import { ThrottleRepo } from '../infra/dynamo/throttle-repo.ts';
 import { jsonLog, type Logger } from '../log.ts';
 import { clientMessageSchema, type ServerMessage } from './messages.ts';
 import { createApiGatewayPusher, type Pusher, wsManagementEndpoint } from './pusher.ts';
@@ -26,6 +27,7 @@ export type WsDeps = {
   /** Cars already parked around a newly watched point (a read of the availability index). */
   cars: Pick<DriverRepo, 'availableNear'>;
   pusher: Pusher;
+  throttle: Pick<ThrottleRepo, 'once'>;
   secret: string;
   log: Logger;
   now?: () => Date;
@@ -35,6 +37,9 @@ const OK: WsResult = { statusCode: 200 };
 
 /** At most this many parked cars are sent when a passenger starts watching (nearest first). */
 export const WATCH_SNAPSHOT_LIMIT = 50;
+
+/** One snapshot per connection in this window, so a socket cannot sweep the city cell by cell. */
+export const WATCH_SNAPSHOT_WINDOW_MS = 10_000;
 
 /** The token offered as `Sec-WebSocket-Protocol: ridecore.v1, <token>`; undefined for any other shape. */
 function offeredToken(headers: WsEvent['headers']): string | undefined {
@@ -108,8 +113,10 @@ export function createWsHandler(deps: WsDeps): (event: WsEvent) => Promise<WsRes
         const point = { lat: msg.lat, lng: msg.lng };
         await connections.watch(connectionId, cellOf(point));
         // Cars only push when they move; send the ones already parked here so the map is not empty.
+        // Rate-limited per connection (ADR 0005): watching keeps working, the snapshot does not repeat.
         const at = now().toISOString();
-        for (const car of await deps.cars.availableNear(point, WATCH_SNAPSHOT_LIMIT)) {
+        const snapshot = await deps.throttle.once('watch', connectionId, now(), WATCH_SNAPSHOT_WINDOW_MS);
+        for (const car of snapshot ? await deps.cars.availableNear(point, WATCH_SNAPSHOT_LIMIT) : []) {
           if (car.position === undefined) continue;
           await reply(connectionId, { type: 'car', schemaVersion: 1, driverId: car.id, category: car.vehicle.category, position: car.position, at });
         }
@@ -142,6 +149,7 @@ export const handler = (event: WsEvent): Promise<WsResult> => {
       drivers: services(deps).drivers,
       cars: deps.drivers,
       pusher: createApiGatewayPusher(wsManagementEndpoint()),
+      throttle: new ThrottleRepo(doc, table),
       secret,
       log: jsonLog,
     });
