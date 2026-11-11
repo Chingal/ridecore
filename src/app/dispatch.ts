@@ -4,6 +4,16 @@ import { type Actor, type Trip, transition } from '../domain/trip.ts';
 import { type DriverRepo, notOffered } from '../infra/dynamo/driver-repo.ts';
 import { type ResultItem, resultItems } from '../infra/dynamo/transact.ts';
 import type { OfferState, TripRepo } from '../infra/dynamo/trip-repo.ts';
+import type { LatLng } from '../domain/trip.ts';
+
+/**
+ * Where dispatch finds nearby drivers: AVAILABLE drivers near `p`, nearest first, at most `limit`.
+ * By default the DynamoDB availability index (DriverRepo); with RIDECORE_LOCATION_URL set, the
+ * ridecore-location service (src/infra/location/client.ts).
+ */
+export interface NearbySource {
+  availableNear(p: LatLng, limit: number): Promise<{ id: string }[]>;
+}
 
 /** How many nearby drivers get an offer per `offerTrip` call. */
 export const OFFER_FANOUT = 5;
@@ -51,8 +61,9 @@ export const OFFER_ATTEMPTS = 5;
 const tripNotFound = () => new DomainError('TRIP_NOT_FOUND', 404, 'Trip not found');
 const isConcurrentUpdate = (err: unknown) => err instanceof DomainError && err.code === 'CONCURRENT_UPDATE';
 
-export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): Dispatch {
+export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo; nearby?: NearbySource }): Dispatch {
   const { trips, drivers } = deps;
+  const nearby: NearbySource = deps.nearby ?? drivers;
 
   async function load(tripId: string): Promise<{ trip: Trip; offers: OfferState }> {
     const found = await trips.getWithOffers(tripId);
@@ -89,7 +100,7 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): 
         const already = new Set(offers.driverIds);
         const room = Math.min(OFFER_FANOUT, MAX_OFFERS_PER_TRIP - already.size);
         if (room <= 0) return [];
-        const ids = (await drivers.availableNear(trip.origin, OFFER_FANOUT + already.size))
+        const ids = (await nearby.availableNear(trip.origin, OFFER_FANOUT + already.size))
           .map((d) => d.id)
           .filter((id) => !already.has(id))
           .slice(0, room);
@@ -111,7 +122,7 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo }): 
       const { trip, offers } = await load(tripId);
       if (trip.state !== 'REQUESTED') return { driverIds: [], fresh: false };
       if (offers.seq > 0) return { driverIds: offers.driverIds, fresh: false };
-      const ids = (await drivers.availableNear(trip.origin, OFFER_FANOUT)).map((d) => d.id);
+      const ids = (await nearby.availableNear(trip.origin, OFFER_FANOUT)).map((d) => d.id);
       if (ids.length === 0) return { driverIds: [], fresh: true };
       try {
         // Guarded on the never-offered counter: of two concurrent calls only one writes.
