@@ -6,16 +6,13 @@ import { Topic } from 'aws-cdk-lib/aws-sns';
 import { SqsSubscription } from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Queue } from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
+import { EVENT_BUS_NAME, EVENT_SOURCE, OFFERS_TOPIC_NAME } from '../../src/events/names.ts';
 import { TABLE_DEFINITION, tableNameFromEnv } from '../../src/infra/dynamo/keys.ts';
 
 export interface StatefulStackProps extends StackProps {
   tableName?: string;
 }
 
-/** Names shared with the functions, the scripts and the docs (Plan 2a, ADR 0004). */
-export const EVENT_BUS_NAME = 'ridecore';
-export const EVENT_SOURCE = 'ridecore.trips';
-export const OFFERS_TOPIC_NAME = 'ridecore-driver-offers';
 
 /** 6 x the 10 s Lambda timeout, so a message is never visible again while a consumer still runs. */
 const VISIBILITY_TIMEOUT = Duration.seconds(60);
