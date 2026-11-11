@@ -56,33 +56,51 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     };
     // The race also covers a fetch implementation that ignores the signal.
     const aborted = new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    // Headers and body both count against the timeout: a body that stalls is as unavailable as no answer.
     let res: Response;
+    let text: string;
     try {
-      res = await Promise.race([doFetch(`${baseUrl}${path}`, init), aborted]);
+      [res, text] = await Promise.race([
+        doFetch(`${baseUrl}${path}`, init).then(async (r) => [r, await r.text()] as const),
+        aborted,
+      ]);
     } catch {
       throw new ApiError(0, 'API_UNAVAILABLE', `The ridecore API at ${baseUrl} did not answer`);
     }
-    const text = await res.text();
     let parsed: unknown;
     try {
       parsed = text === '' ? undefined : JSON.parse(text);
     } catch {
       parsed = undefined;
     }
-    if (res.ok) return parsed;
+    if (res.ok) {
+      if (typeof parsed !== 'object' || parsed === null) throw unexpected(res.status);
+      return parsed;
+    }
     const error = (parsed as { error?: { code?: unknown; message?: unknown } } | undefined)?.error;
     if (typeof error?.code === 'string' && typeof error.message === 'string') throw new ApiError(res.status, error.code, error.message);
     throw new ApiError(res.status, 'API_ERROR', `The ridecore API answered ${res.status}`);
   }
 
+  const unexpected = (status: number) =>
+    new ApiError(status, 'API_ERROR', `The ridecore API at ${baseUrl} answered ${status} with an unexpected body (is RIDECORE_API_URL right?)`);
+  const asTrip = (body: unknown, status = 200): Trip => {
+    if (typeof (body as { id?: unknown }).id !== 'string') throw unexpected(status);
+    return body as Trip;
+  };
+
   const tripPath = (tripId: string) => `/trips/${encodeURIComponent(tripId)}`;
 
   return {
     requestTrip: async (input) =>
-      (await call('POST', '/trips', { origin: input.origin, destination: input.destination }, { 'idempotency-key': newKey() })) as Trip,
-    getTrip: async (tripId) => (await call('GET', tripPath(tripId))) as Trip,
+      asTrip(await call('POST', '/trips', { origin: input.origin, destination: input.destination }, { 'idempotency-key': newKey() }), 201),
+    getTrip: async (tripId) => asTrip(await call('GET', tripPath(tripId))),
     cancelTrip: async (tripId, reason) =>
-      (await call('POST', `${tripPath(tripId)}/cancel`, reason === undefined ? undefined : { reason })) as Trip,
-    listMyTrips: async () => ((await call('GET', '/me/trips')) as { items: Trip[] }).items,
+      asTrip(await call('POST', `${tripPath(tripId)}/cancel`, reason === undefined ? undefined : { reason })),
+    listMyTrips: async () => {
+      const { items } = (await call('GET', '/me/trips')) as { items?: unknown };
+      if (!Array.isArray(items)) throw unexpected(200);
+      return items.map((item) => asTrip(item));
+    },
   };
 }

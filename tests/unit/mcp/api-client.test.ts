@@ -93,6 +93,20 @@ describe('createApiClient', () => {
     await expect(api.listMyTrips()).rejects.toMatchObject({ status: 502, code: 'API_ERROR' });
   });
 
+  it('a body that stalls after the headers is API_UNAVAILABLE once the timeout passes', async () => {
+    const stalled = { ok: true, status: 200, text: () => new Promise<string>(() => undefined) } as unknown as Response;
+    const { api } = client(() => stalled, { timeoutMs: 50 });
+    await expect(api.listMyTrips()).rejects.toMatchObject({ status: 0, code: 'API_UNAVAILABLE' });
+  });
+
+  it('a success that is not a JSON object (wrong RIDECORE_API_URL) is API_ERROR, not a crash', async () => {
+    const { api } = client(() => new Response('<html>some other server</html>', { status: 200 }));
+    await expect(api.listMyTrips()).rejects.toMatchObject({ status: 200, code: 'API_ERROR' });
+    await expect(api.getTrip('t-1')).rejects.toMatchObject({ status: 200, code: 'API_ERROR' });
+    const noItems = client(() => json(200, { other: 1 }));
+    await expect(noItems.api.listMyTrips()).rejects.toMatchObject({ status: 200, code: 'API_ERROR' });
+  });
+
   it('a refused connection or a timeout is API_UNAVAILABLE, naming the URL and never the token', async () => {
     const refused = client(() => Promise.reject(new TypeError('fetch failed')));
     const hanging = client(

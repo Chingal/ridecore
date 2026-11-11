@@ -132,6 +132,9 @@ claude mcp add ridecore --env RIDECORE_MCP_TOKEN="$(make -s mcp-token)" \
   -- node --import "$PWD/scripts/load-env.ts" "$PWD/src/mcp/main.ts"
 ```
 
+That uses the API in Floci (`RIDECORE_API_URL` from `.env.deploy`). To use the local server of `make dev`
+instead, add `--env RIDECORE_API_URL=http://localhost:3000` before the `--`.
+
 The command is `node` and not `npm run mcp`, because npm prints a banner to stdout and stdout carries only
 the protocol. Any MCP client that starts a stdio server works the same way. Then ask, for example, *"Request
 a trip from 2.4448, -76.6147 to 2.4594, -76.5996 and tell me its status"*: the agent calls `request_trip`
