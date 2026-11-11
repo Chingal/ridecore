@@ -1,10 +1,12 @@
-import { QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'node:crypto';
 import { afterAll, describe, expect, it } from 'vitest';
 import type { Actor, LatLng, Trip } from '../../src/domain/trip.ts';
 import { signToken } from '../../src/http/auth.ts';
 import { createDeps } from '../../src/http/deps.ts';
+import { BillingRepo } from '../../src/infra/dynamo/billing-repo.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
+import { ConsumedRepo } from '../../src/infra/dynamo/consumed-repo.ts';
 
 /**
  * Full trip over real HTTP. The target is `RIDECORE_API_URL`: the Floci-deployed Lambda behind the
@@ -23,9 +25,21 @@ const TABLE = required('RIDECORE_TABLE', 'expected from .env.deploy or .env.exam
 const SECRET = required('RIDECORE_JWT_SECRET', 'expected from .env.example');
 
 const doc = createDocumentClient(createDynamoClient());
-// Offering a trip to drivers is an asynchronous consumer of `trip.requested` (Plan 2); no HTTP route
-// triggers it yet, so the test runs the same dispatch use case directly against the shared table.
+// The trip reaches drivers only through the event path (outbox -> stream -> EventBridge -> dispatch
+// consumer, ADR 0004); `deps` is used for driver registration, cleanup and reading the billing record.
 const deps = createDeps({ doc, table: TABLE, jwtSecret: SECRET, log: () => undefined });
+const billing = new BillingRepo(doc, TABLE, new ConsumedRepo(doc, TABLE));
+
+/** Polls `read` every second until `done` holds; fails with `what` after `timeoutMs`. */
+async function eventually<T>(what: string, read: () => Promise<T>, done: (value: T) => boolean, timeoutMs = 30_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (done(value)) return value;
+    if (Date.now() > deadline) throw new Error(`Timed out after ${timeoutMs} ms waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
 
 type Person = Actor & { token: string };
 type Res = { status: number; body: Record<string, unknown> };
@@ -91,7 +105,7 @@ afterAll(async () => {
 });
 
 describe(`trip flow over HTTP (${API})`, () => {
-  it('request -> accept -> arrive -> start -> complete -> rate, with outbox EVENT#000001..000006', async () => {
+  it('request -> offer (via events) -> accept -> arrive -> start -> complete (billed via events) -> rate', async () => {
     const passenger = await person('passenger');
     const drv = await person('driver');
     leftovers.passenger = passenger;
@@ -115,10 +129,14 @@ describe(`trip flow over HTTP (${API})`, () => {
     leftovers.tripId = trip.id;
     expect(trip).toMatchObject({ passengerId: passenger.id, state: 'REQUESTED', version: 1 });
 
-    expect(await deps.dispatch.offerTrip(trip.id)).toContain(drv.id);
-    const offers = await call('GET', '/drivers/me/offers', drv);
+    // The driver is AVAILABLE at the origin before the request: dispatch runs asynchronously and
+    // never re-offers a trip, so a driver who comes online later would not get it.
+    const offers = await eventually(
+      'the dispatch consumer to offer the trip to the driver',
+      () => call('GET', '/drivers/me/offers', drv),
+      (res) => res.status === 200 && (res.body.items as Trip[]).some((t) => t.id === trip.id),
+    );
     expect(offers.status).toBe(200);
-    expect((offers.body.items as Trip[]).map((t) => t.id)).toContain(trip.id);
 
     for (const [step, state] of [
       ['accept', 'ACCEPTED'],
@@ -130,6 +148,22 @@ describe(`trip flow over HTTP (${API})`, () => {
       expect(res.status, step).toBe(200);
       expect(tripOf(res)).toMatchObject({ state, driverId: drv.id });
     }
+
+    const completed = await call('GET', `/trips/${trip.id}`, passenger);
+    const finalFare = tripOf(completed).finalFare;
+    expect(finalFare).toEqual(expect.any(Number));
+    const bill = await eventually(
+      'the billing consumer to record the final fare',
+      () => billing.get(trip.id),
+      (record) => record !== null,
+    );
+    expect(bill).toMatchObject({ tripId: trip.id, passengerId: passenger.id, driverId: drv.id, finalFare });
+
+    await eventually(
+      'the driver-offers consumer to record the SNS offer',
+      () => doc.send(new GetCommand({ TableName: TABLE, Key: { PK: 'CONSUMED#driver-offers', SK: `EVENT#${trip.id}:${drv.id}` }, ConsistentRead: true })),
+      (res) => res.Item !== undefined,
+    );
 
     const rated = await call('POST', `/trips/${trip.id}/rating`, passenger, { score: 5, comment: 'Smooth ride' });
     expect(rated.status).toBe(200);

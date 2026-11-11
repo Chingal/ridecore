@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint
+.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive
 
 # Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
 # this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
@@ -84,3 +84,13 @@ test:
 
 lint:
 	npm run lint
+
+# Watch an event fail 3 times and land in the billing DLQ (about 2-3 minutes; ADR 0004).
+dlq-demo:
+	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
+	@$(LOAD_ENV) && node scripts/dlq-demo.ts
+
+# Move a DLQ's messages back to its queue: make redrive QUEUE=billing (or dispatch, driver-offers).
+redrive:
+	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
+	@$(LOAD_ENV) && node scripts/redrive.ts $(QUEUE)
