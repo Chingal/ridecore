@@ -129,5 +129,5 @@ export const watchGsi2 = (cell: string, connectionId: string) => ({ GSI2PK: watc
 
 export const watchCellPk = (cell: string) => `WATCH#${cell}`;
 
-/** "At most once per window" marker, e.g. one position broadcast per driver every few seconds. */
-export const throttleKey = (scope: string, id: string) => ({ PK: `THROTTLE#${scope}`, SK: id });
+/** "At most once per window" marker, e.g. one position broadcast per driver every few seconds (one partition per id). */
+export const throttleKey = (scope: string, id: string) => ({ PK: `THROTTLE#${scope}#${id}`, SK: 'META' });

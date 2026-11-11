@@ -1,5 +1,6 @@
 import type { APIGatewayProxyWebsocketEventV2 } from 'aws-lambda';
 import type { DriverService } from '../app/drivers.ts';
+import type { DriverRepo } from '../infra/dynamo/driver-repo.ts';
 import { DomainError } from '../domain/errors.ts';
 import { verifyRawToken } from '../http/auth.ts';
 import { createDeps, jwtSecretFromEnv, services } from '../http/deps.ts';
@@ -22,6 +23,8 @@ export type WsResult = { statusCode: number; headers?: Record<string, string>; b
 export type WsDeps = {
   connections: Pick<ConnectionRepo, 'put' | 'get' | 'remove' | 'watch'>;
   drivers: Pick<DriverService, 'setPosition'>;
+  /** Cars already parked around a newly watched point (a read of the availability index). */
+  cars: Pick<DriverRepo, 'availableNear'>;
   pusher: Pusher;
   secret: string;
   log: Logger;
@@ -29,6 +32,9 @@ export type WsDeps = {
 };
 
 const OK: WsResult = { statusCode: 200 };
+
+/** At most this many parked cars are sent when a passenger starts watching (nearest first). */
+export const WATCH_SNAPSHOT_LIMIT = 50;
 
 /** The token offered as `Sec-WebSocket-Protocol: ridecore.v1, <token>`; undefined for any other shape. */
 function offeredToken(headers: WsEvent['headers']): string | undefined {
@@ -98,7 +104,16 @@ export function createWsHandler(deps: WsDeps): (event: WsEvent) => Promise<WsRes
       await reply(connectionId, { type: 'pong', schemaVersion: 1 });
     } else if (msg.action === 'watch') {
       if (actor.role !== 'passenger') await reply(connectionId, error('FORBIDDEN', 'Only passengers watch the map'));
-      else await connections.watch(connectionId, cellOf({ lat: msg.lat, lng: msg.lng }));
+      else {
+        const point = { lat: msg.lat, lng: msg.lng };
+        await connections.watch(connectionId, cellOf(point));
+        // Cars only push when they move; send the ones already parked here so the map is not empty.
+        const at = now().toISOString();
+        for (const car of await deps.cars.availableNear(point, WATCH_SNAPSHOT_LIMIT)) {
+          if (car.position === undefined) continue;
+          await reply(connectionId, { type: 'car', schemaVersion: 1, driverId: car.id, category: car.vehicle.category, position: car.position, at });
+        }
+      }
     } else if (actor.role !== 'driver') {
       await reply(connectionId, error('FORBIDDEN', 'Only drivers send positions'));
     } else {
@@ -121,9 +136,11 @@ export const handler = (event: WsEvent): Promise<WsResult> => {
     const doc = createDocumentClient();
     const table = tableNameFromEnv();
     const secret = jwtSecretFromEnv();
+    const deps = createDeps({ doc, table, jwtSecret: secret });
     lambda = createWsHandler({
       connections: new ConnectionRepo(doc, table),
-      drivers: services(createDeps({ doc, table, jwtSecret: secret })).drivers,
+      drivers: services(deps).drivers,
+      cars: deps.drivers,
       pusher: createApiGatewayPusher(wsManagementEndpoint()),
       secret,
       log: jsonLog,

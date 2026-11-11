@@ -33,7 +33,7 @@ with one command, with no AWS account and no cost.
   (at-least-once delivery, duplicates are expected).
 - **Real-time updates over WebSocket** ([ADR 0005](docs/decisions/0005-real-time.md)): API Gateway WebSocket
   API with the same JWT. Trip updates reach the trip's passenger and driver, new offers reach the driver,
-  and passengers watching the map see available cars nearby (throttled, by geohash cell). Once a driver is
+  and passengers watching the map see available cars nearby (parked cars on opening, then their moves, throttled by geohash cell). Once a driver is
   on a trip, their position goes only to that trip's passenger. Pushes are driven by the events above; the
   real-time layer never writes trip state.
 - Structured JSON logs; every response carries an `x-correlation-id` header, and the same id travels in

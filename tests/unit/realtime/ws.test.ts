@@ -30,6 +30,11 @@ const handler = () =>
       remove: async (id) => void stored.delete(id),
       watch: async (id, cell) => void watched.push([id, cell]),
     },
+    cars: {
+      availableNear: async () => [
+        { id: 'd7', name: 'Secret Name', vehicle: { plate: 'PLATE7', model: 'M', category: 'STANDARD' }, availability: 'AVAILABLE', position: POPAYAN, geohash5: cellOf(POPAYAN) },
+      ],
+    },
     drivers: {
       setPosition: async (actor, p) => {
         if (positionError) throw positionError;
@@ -98,10 +103,11 @@ describe('$default', () => {
     stored.set('dc', { connectionId: 'dc', actor: DRIVER, connectedAt: NOW.toISOString() });
   });
 
-  it('a passenger watches the cell of a point', async () => {
+  it('a passenger watches the cell of a point and gets the cars already parked around it', async () => {
     expect((await message('pc', { action: 'watch', ...POPAYAN })).statusCode).toBe(200);
     expect(watched).toEqual([['pc', cellOf(POPAYAN)]]);
-    expect(pushed).toEqual([]);
+    expect(pushed).toEqual([['pc', { type: 'car', schemaVersion: 1, driverId: 'd7', category: 'STANDARD', position: POPAYAN, at: NOW.toISOString() }]]);
+    expect(JSON.stringify(pushed)).not.toMatch(/Secret Name|PLATE7/);
   });
 
   it('a driver may not watch; a passenger may not send positions', async () => {

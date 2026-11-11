@@ -51,8 +51,9 @@ The trip API and the event path (ADR 0004) change state and deliver events, but 
 **Gone sockets.** A push that gets `GoneException` (410) removes that connection item, and the message still counts as handled. Any other push error fails the SQS message or stream record, so it is retried.
 
 **The map is best effort.**
-- **Throttle.** At most one `car` or `driver_position` per driver every 3 s, held in its own item (`THROTTLE#position`), never on the driver item. A handler that wrote the driver item would trigger itself through the stream.
-- **`car.left`.** It has its own throttle scope, so a recent `car` never holds it back.
+- **Throttle.** At most one `car` or `driver_position` per driver every 3 s, held in its own item (`THROTTLE#position#<driverId>`, one partition per driver), never on the driver item. A handler that wrote the driver item would trigger itself through the stream.
+- **`car.left`.** It has its own throttle scope, so a recent `car` never holds it back. An OFFLINE driver sends it at most every 3 s. An on-trip driver sends it once per trip (`THROTTLE#left#<driverId>#<tripId>`), so watchers along the route learn nothing about where the car goes.
+- **Opening the map.** On `watch`, the passenger also gets a `car` for each available driver already parked in the 3 × 3 cells (at most 50, nearest first). That is a read of the availability index, the same one dispatch uses. Without it, a parked car would appear only when it moved.
 - **Cars that change cell.** The stream image has no previous value (`NEW_IMAGE`), so a car that moves to another cell is not announced to the old cell. The client drops any car not updated for 30 s.
 - **Late records.** Stream records older than 30 s are skipped, so a late position does not reach a later trip's passenger.
 - **Failures.** The positions mapping retries 3 times and has no failure destination, because the next position replaces a lost one.

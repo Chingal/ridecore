@@ -125,11 +125,31 @@ describe('positions handler', () => {
     expect(pushed.some(([, m]) => m.type === 'car')).toBe(false);
   });
 
-  it('OFFLINE: watchers of the stored cell get car.left, not throttled', async () => {
+  it('OFFLINE: watchers of the stored cell get car.left, even right after a car push', async () => {
     const h = handler();
     await h(stream(record(driverItem('AVAILABLE'))));
     await h(stream(record(driverItem('OFFLINE'))));
     expect(pushed.filter(([id, m]) => id === 'w1' && m.type === 'car.left')).toHaveLength(1);
+  });
+
+  it('OFFLINE positions every 200 ms send car.left at most once per window', async () => {
+    const h = handler();
+    for (let k = 0; k < 10; k++) {
+      now = new Date(T0.getTime() + k * 200);
+      await h(stream(record(driverItem('OFFLINE'), now)));
+    }
+    expect(pushed.filter(([id, m]) => id === 'w1' && m.type === 'car.left')).toHaveLength(1);
+  });
+
+  it('ON_TRIP: car.left goes out once per trip, not on every position during the trip', async () => {
+    activeTrips = { d1: 't1' };
+    const h = handler();
+    for (const ms of [0, 3500, 7000, 10500]) {
+      now = new Date(T0.getTime() + ms);
+      await h(stream(record(driverItem('ON_TRIP'), now)));
+    }
+    expect(pushed.filter(([id, m]) => id === 'w1' && m.type === 'car.left')).toHaveLength(1);
+    expect(pushed.filter(([id, m]) => id === 'pc' && m.type === 'driver_position')).toHaveLength(4);
   });
 
   it('ignores items that are not drivers, and drivers with no position or cell', async () => {
@@ -142,7 +162,7 @@ describe('positions handler', () => {
     expect(pushed).toEqual([]);
   });
 
-  it('ON_TRIP right after an AVAILABLE update still tells watchers the car left (car.left is never throttled)', async () => {
+  it('ON_TRIP right after an AVAILABLE update still tells watchers the car left (its own throttle scope)', async () => {
     const h = handler();
     await h(stream(record(driverItem('AVAILABLE'))));
     now = new Date(T0.getTime() + 500);

@@ -15,6 +15,9 @@ import { createApiGatewayPusher, type Pusher, sendToActor, sendToConnections, ws
 /** At most one position push per driver in this window (ADR 0005). */
 export const POSITION_THROTTLE_MS = 3000;
 
+/** One `car.left` per trip: longer than any trip (a socket lives 2 h; the marker's TTL adds 1 h more). */
+export const TRIP_LEFT_WINDOW_MS = 3 * 60 * 60 * 1000;
+
 /** Stream records older than this are skipped: a late position is stale, and the driver may be on another trip by now. */
 export const POSITION_MAX_AGE_MS = 30_000;
 
@@ -52,9 +55,9 @@ function driverOf(image: Record<string, AttributeValue> | undefined): DriverImag
 /**
  * Driver items from the table stream (a second mapping, filter `entity: DRIVER`) → map pushes:
  * - AVAILABLE with a position: `car` to passengers watching its cell or a neighbour (throttled);
- * - OFFLINE: `car.left` to those watchers;
- * - ON_TRIP: `car.left` to the watchers and `driver_position` to that trip's passenger only (each throttled
- *   in its own scope).
+ * - OFFLINE: `car.left` to those watchers (throttled in its own scope);
+ * - ON_TRIP: `car.left` to the watchers once per trip, and `driver_position` to that trip's passenger only
+ *   (throttled).
  * Records older than POSITION_MAX_AGE_MS are skipped (a stale position could reach a later trip's passenger).
  * The stream is NEW_IMAGE, so a car that moves to another cell leaves the old cell's maps by the
  * client's expiry. Nothing here writes a driver item, so it can never trigger itself. A failing push
@@ -71,13 +74,26 @@ export function createPositionsHandler(deps: PositionsDeps): (event: DynamoDBStr
 
   const handle = async (driver: DriverImage) => {
     const at = now();
+    // `car.left` has its own throttle scope, so a recent `car` never holds it back.
     if (driver.availability === 'OFFLINE') {
-      if (driver.cell !== undefined) await toWatchers(driver.cell, { type: 'car.left', schemaVersion: 1, driverId: driver.id });
+      if (driver.cell !== undefined && (await deps.throttle.once('left', driver.id, at, POSITION_THROTTLE_MS))) {
+        await toWatchers(driver.cell, { type: 'car.left', schemaVersion: 1, driverId: driver.id });
+      }
       return;
     }
     if (driver.position === undefined || driver.cell === undefined) return;
-    // `car.left` has its own throttle scope, so a recent `car` never holds it back.
-    if (driver.availability === 'ON_TRIP' && (await deps.throttle.once('left', driver.id, at, POSITION_THROTTLE_MS))) {
+    // On a trip: `car.left` once per trip (keyed by trip), never again while the car moves, so
+    // watchers along the route learn nothing about where an on-trip driver goes.
+    // (ON_TRIP without a reservation is a race with the accept/finish transaction: fall back to the
+    // short window.)
+    const tripId = driver.availability === 'ON_TRIP' ? await deps.trips.activeTripId('DRIVER', driver.id) : null;
+    const leftOnce =
+      driver.availability !== 'ON_TRIP'
+        ? false
+        : tripId === null
+          ? await deps.throttle.once('left', driver.id, at, POSITION_THROTTLE_MS)
+          : await deps.throttle.once('left', `${driver.id}#${tripId}`, at, TRIP_LEFT_WINDOW_MS);
+    if (leftOnce) {
       await toWatchers(driver.cell, { type: 'car.left', schemaVersion: 1, driverId: driver.id });
     }
     if (!(await deps.throttle.once('position', driver.id, at, POSITION_THROTTLE_MS))) return;
@@ -94,7 +110,6 @@ export function createPositionsHandler(deps: PositionsDeps): (event: DynamoDBStr
       return;
     }
     if (driver.availability === 'ON_TRIP') {
-      const tripId = await deps.trips.activeTripId('DRIVER', driver.id);
       const trip = tripId === null ? null : await deps.trips.get(tripId);
       if (trip === null) return;
       await sendToActor(pusher, connections, { id: trip.passengerId, role: 'passenger' }, {
