@@ -27,10 +27,13 @@ It is the first step of a **scaling track**: a sequence of repositories that sho
    - The current position is kept in **Redis** with a geo index.
    - Every position is appended to **Kafka**, partitioned by geohash-5 cell.
 2. **Nearby query.** Over HTTP, given a point and a limit, it returns the nearest drivers with a fresh position (seen within 30 s), nearest first. ridecore's dispatch uses it.
-3. **Live map.**
+3. **Live map, fed by Kafka.**
    - Passengers connect with their JWT and `watch` a point.
-   - They get **one message per cell per second** with the cars in the 3 × 3 cells around them: driver id, category and position, nothing personal.
-   - A car that stops reporting drops out.
+   - They get **one message per cell per second** with the cars in the 3 × 3 cells around them: driver id and position, nothing personal.
+   - The map broadcaster is a **Kafka consumer** in its own consumer group. It reads the position topic, keeps the latest position per driver per cell in memory, and sends each cell's batch once a second. It does not read Redis on every tick. Redis stays for the nearby query.
+   - A car that stops reporting drops out after 30 s. Because positions are keyed by cell, a driver's updates can arrive out of order when they cross a cell border; the broadcaster keeps the one with the newest timestamp.
+   - **Why Kafka and not Redis for the map:** with more traffic, more broadcaster instances join the group and Kafka spreads the partitions (cells) among them. This is how the map scales, and it is the part of the track that teaches partitions, consumer groups, offsets and rebalancing. The cost is a few milliseconds of extra delay on the map, which a map tolerates.
+   - **Limit stated, not hidden:** with one instance, which is the local setup, every cell is in the same process. With several instances, a watcher connected to instance A may watch a cell whose partition belongs to instance B. The scaling ADR compares the two answers (route each watcher to the instance that owns its cells, or let each instance read the partitions its own watchers need, outside a group) and picks one. Locally, only one instance runs.
 4. **Driver position during a trip.** That trip's passenger gets the assigned driver's position. Trip assignments are learned from ridecore's own events: `trip.accepted` sets one, and the trip's end (`trip.completed`, `trip.cancelled`) clears it. The events arrive on an SQS queue fed by an EventBridge rule in ridecore's CDK stack, so the location service never calls ridecore to ask.
 5. **ridecore changes** (Node), behind one setting:
    - With `RIDECORE_LOCATION_URL` **unset**, ridecore behaves exactly as today. This keeps the "before" measurement and the current e2e tests.
@@ -82,7 +85,8 @@ It is the first step of a **scaling track**: a sequence of repositories that sho
   - `testcontainers-go` for integration tests.
 - **Data:**
   - Redis holds only current state: the geo set per area, the last-seen time per driver, and the trip assignments. That state is **disposable**, and losing a few seconds of positions is acceptable.
-  - Kafka holds the position history, partitioned by cell.
+  - Kafka holds the position history, partitioned by cell, and is the source the live map reads from.
+  - **Two kinds of events, two tools:** business events (a trip requested, accepted, completed) are few and valuable, and go through EventBridge and SQS with DLQs and deduplication, as ridecore does today. Positions are many and short-lived, and go through Kafka. Mixing the two on one channel is what broke the load test (ADR 0008).
   - Nothing a person paid for or agreed to lives here; that stays in DynamoDB.
 - **Repository:** `github.com/Chingal/ridecore-location`, MIT, created **private**. It becomes public only by the owner's order, and nothing is pushed without that order. ridecore's README gains a "Scaling track" section with the links.
 - **Message contracts** (driver position in, map message out, nearby query) are versioned (`schemaVersion: 1`) and documented in both repositories.
@@ -102,7 +106,7 @@ It is the first step of a **scaling track**: a sequence of repositories that sho
    - **Offline drivers:** a driver who goes OFFLINE stops sending positions and drops out after 30 s. The driver app sets availability through ridecore's HTTP API, as today.
 2. **ridecore's DynamoDB index is left alone.** In Go mode, ridecore writes no positions, so drivers never enter the `AVAIL#cell` index and the positions Lambda gets no driver records. `finishTrip` and `setAvailability` keep their current code. With the setting off, nothing changes.
 3. **No `category` in the location service's messages for now.** Every trip is `STANDARD`, and the location service does not know vehicles. The map message carries driver id, position and time; the contract notes the field as reserved.
-4. **Kafka has a consumer: replay.** A `replay` command rebuilds the Redis state from the Kafka history, with an integration test that empties Redis and checks it is restored. Without a consumer, Kafka would be decoration, which §4 forbids. The load target is the existing `peak` profile (100 drivers, 200 passengers): the "after" is measured against the same profile as the "before".
+4. **Kafka has two consumers: the live map and replay.** The map broadcaster (goal 3) reads positions in its own consumer group. A `replay` command rebuilds the Redis state from the Kafka history, with an integration test that empties Redis and checks it is restored. Without consumers, Kafka would be decoration, which §4 forbids. (Changed after review with the owner on 2026-11-11: the map first read Redis every second.) The load target is the existing `peak` profile (100 drivers, 200 passengers): the "after" is measured against the same profile as the "before".
 5. **One socket per driver** is enforced by the location service for its own sockets, and a new connection replaces the old one. A driver keeps a ridecore session for offers and trips, plus one location socket for positions.
 6. **Trip assignments are ordered by version and expire.**
    - **The rule and queue:** ridecore's CDK stack gains an EventBridge rule (`trip.accepted`, `trip.completed`, `trip.cancelled`) that feeds a `ridecore-location-trips` queue with its DLQ. The location service reads it with the AWS SDK, using the Floci endpoint and test credentials from env.
@@ -116,6 +120,8 @@ It is the first step of a **scaling track**: a sequence of repositories that sho
 - Folder layout inside the Go repository, package names, the internal interfaces.
 - The exact Redis key design (one geo set per cell vs one global set with a radius query) and the Kafka topic and partition count. Each is decided with a short note or an ADR.
 - How the 1-second map tick is scheduled per cell, and how the cars in the 3 × 3 cells are batched.
+- How the map broadcaster learns which drivers have an active trip (to hide them, §7.1): read the assignments from Redis once per tick, or keep a copy in memory fed by the trip-events queue.
+- The consumer group settings (offset reset to latest for the map, since an old position is useless to a watcher; earliest for replay).
 - The k6 changes for the Go path, kept as close to the current scenarios as possible.
 - The local Kafka image (Apache Kafka in KRaft mode or Redpanda) and the docker-compose layout.
 - How the "before" numbers are kept: reuse `docs/load-results/2026-11-11` or rerun them.
