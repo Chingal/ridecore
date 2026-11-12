@@ -114,3 +114,15 @@ describe('deployedPathMismatch', () => {
     expect(deployedPathMismatch(false, 'http://host.docker.internal:8090')).toMatch(/deployed dispatch uses ridecore-location/);
   });
 });
+
+describe('isOurProcess after a rebuild', () => {
+  const binary = '/home/x/ridecore-location/bin/location';
+  // `go build` replaces the file, so Linux shows the running process's exe as "<path> (deleted)".
+  it('still recognises the service when its binary was rebuilt', () => {
+    expect(isOurProcess(42, binary, () => `${binary} (deleted)`)).toBe(true);
+  });
+  it('rejects any other executable', () => {
+    expect(isOurProcess(42, binary, () => '/usr/bin/zsh')).toBe(false);
+    expect(isOurProcess(42, binary, () => `${binary}-other (deleted)`)).toBe(false);
+  });
+});

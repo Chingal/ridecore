@@ -90,10 +90,14 @@ export function readPid(text: string): number | null {
   return Number(t);
 }
 
-/** True only if `pid` is running `binary` (Linux /proc), so a reused pid is never signalled. */
-export function isOurProcess(pid: number, binary: string): boolean {
+/**
+ * True only if `pid` is running `binary` (Linux /proc), so a reused pid is never signalled. A rebuilt
+ * binary (`go build` replaces the file) shows as "<path> (deleted)" and still counts.
+ */
+export function isOurProcess(pid: number, binary: string, readlink: (path: string) => string = (p) => readlinkSync(p)): boolean {
   try {
-    return readlinkSync(`/proc/${pid}/exe`) === binary;
+    const exe = readlink(`/proc/${pid}/exe`);
+    return exe === binary || exe === `${binary} (deleted)`;
   } catch {
     return false;
   }
@@ -132,11 +136,11 @@ async function start(): Promise<void> {
     const r = spawnSync(cmd, args, { cwd: dir, stdio: 'inherit' });
     if (r.status !== 0) throw new Error(`${cmd} ${args.join(' ')} failed`);
   };
-  must('docker', ['compose', 'up', '-d', '--wait', 'redis', 'kafka']);
-  must('go', ['build', '-trimpath', '-o', 'bin/location', './cmd/location']);
-
+  // Stop the running service first: it holds port 8090, and a new process could not bind it.
   const old = running();
   if (old !== null) await stopAndWait(old);
+  must('docker', ['compose', 'up', '-d', '--wait', 'redis', 'kafka']);
+  must('go', ['build', '-trimpath', '-o', 'bin/location', './cmd/location']);
   mkdirSync('.load', { recursive: true });
   const log = openSync(LOG_FILE, 'a');
   const bridge = docker0();
@@ -165,6 +169,8 @@ async function start(): Promise<void> {
 
   const url = env.RIDECORE_LOCATION_URL ?? LOCATION_DEFAULTS.RIDECORE_LOCATION_URL;
   for (let i = 0; i < 60; i++) {
+    // Healthy AND ours: another process answering on the port (an old instance) does not count.
+    if (!isOurProcess(child.pid ?? 0, binaryOf(dir))) throw new Error(`ridecore-location exited at start; see ${LOG_FILE}`);
     if ((await locationPreflight({ LOCATION: '1', RIDECORE_LOCATION_URL: url })) === null) {
       console.log(`ridecore-location: up on ${url} (and ${bridge ?? 'no docker0'}:8090 for Floci's Lambdas); log in ${LOG_FILE}`);
       return;

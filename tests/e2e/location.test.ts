@@ -110,7 +110,11 @@ describe.skipIf(!on)(`trip flow on the Go path (${LOCATION_URL})`, () => {
     const sendPosition = () => position.ws.send(JSON.stringify({ action: 'position', ...ORIGIN }));
 
     // The car shows on the Go map and in the nearby query.
-    await until('the car on the Go map', map, (m) => m.type === 'cars' && JSON.stringify(m.cars).includes(drv.id), sendPosition);
+    // The map shows a temporary carId, never the driver id: find the car by its exact position.
+    const isOurCar = (c: { lat: number; lng: number }) => c.lat === ORIGIN.lat && c.lng === ORIGIN.lng;
+    const onMap = await until('the car on the Go map', map, (m) => m.type === 'cars' && (m.cars as { lat: number; lng: number }[]).some(isOurCar), sendPosition);
+    expect(JSON.stringify(onMap)).not.toContain(drv.id);
+    expect((onMap.cars as { carId?: unknown }[]).every((c) => typeof c.carId === 'string')).toBe(true);
     expect(await nearbyIds(ORIGIN)).toContain(drv.id);
 
     const created = await call('POST', '/trips', passenger, { origin: ORIGIN, destination: DESTINATION }, { 'idempotency-key': randomUUID() });
