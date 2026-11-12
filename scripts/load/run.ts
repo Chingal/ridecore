@@ -2,6 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { createDynamoClient } from '../../src/infra/dynamo/client.ts';
+import { GetFunctionConfigurationCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import { deployedPathMismatch, locationPreflight } from '../location.ts';
 
 /**
  * `make load PROFILE=...` (docs/load-testing.md): setup -> DLQ baseline -> k6 -> invariant check,
@@ -10,6 +12,8 @@ import { createDynamoClient } from '../../src/infra/dynamo/client.ts';
  */
 const K6_IMAGE = 'grafana/k6:2.3.0';
 const K6_CONTAINER = 'ridecore-load-k6';
+/** The dispatch consumer as osls names it (service ridecore, stage dev). */
+const DISPATCH_FUNCTION = 'ridecore-dev-dispatch';
 
 // Ctrl-C reaches the child (same process group) and stops it; this process must outlive it so the
 // `finally` below still tears the actors down.
@@ -27,6 +31,30 @@ for (const name of ['RIDECORE_TABLE', 'RIDECORE_API_URL', 'RIDECORE_WS_URL']) {
     process.exit(1);
   }
 }
+
+// The Go path (LOCATION=1): ridecore-location must answer before any actor is created.
+const locationError = await locationPreflight(process.env);
+if (locationError !== null) {
+  console.error(locationError);
+  process.exit(1);
+}
+const goPath = process.env.LOCATION === '1';
+// The deployed dispatch Lambda decides where drivers are looked up; actors and sockets must match it.
+let deployedUrl: string | undefined;
+try {
+  const fn = await new LambdaClient({}).send(new GetFunctionConfigurationCommand({ FunctionName: DISPATCH_FUNCTION }), { abortSignal: AbortSignal.timeout(5000) });
+  deployedUrl = fn.Environment?.Variables?.RIDECORE_LOCATION_URL;
+} catch (err) {
+  console.error(`load: cannot read the deployed ${DISPATCH_FUNCTION} (${(err as Error).name}): run 'make up' first`);
+  process.exit(1);
+}
+const mismatch = deployedPathMismatch(goPath, deployedUrl);
+if (mismatch !== null) {
+  console.error(`load: ${mismatch}`);
+  process.exit(1);
+}
+console.log(`load: path ${goPath ? 'Go (ridecore-location)' : 'DynamoDB index'}, matching the deployed dispatch`);
+if (goPath) console.log(`load: Go path, positions and map through ridecore-location (${process.env.RIDECORE_LOCATION_WS_URL})`);
 
 const node = (script: string, ...args: string[]) =>
   spawnSync(process.execPath, ['--import', './scripts/load-env.ts', script, ...args], { stdio: 'inherit' }).status ?? 1;
@@ -55,7 +83,8 @@ try {
     const k6 = spawnSync(
       'docker',
       ['run', '--rm', '--name', K6_CONTAINER, '--user', uid, '--network', 'host', '-v', `${process.cwd()}/load:/load:ro`, '-v', `${process.cwd()}/.load:/data`,
-        K6_IMAGE, 'run', '--quiet', '-e', `API=${process.env.RIDECORE_API_URL}`, '-e', `WS=${process.env.RIDECORE_WS_URL}`, '-e', `PROFILE=${profileName}`, '/load/rush-hour.js'],
+        K6_IMAGE, 'run', '--quiet', '-e', `API=${process.env.RIDECORE_API_URL}`, '-e', `WS=${process.env.RIDECORE_WS_URL}`, '-e', `PROFILE=${profileName}`,
+        ...(goPath ? ['-e', `LOC_WS=${process.env.RIDECORE_LOCATION_WS_URL}`] : []), '/load/rush-hour.js'],
       { stdio: 'inherit' },
     );
     step('k6', k6.status ?? 1);

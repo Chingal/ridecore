@@ -1,5 +1,6 @@
 import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   type DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
@@ -62,6 +63,10 @@ export const GEOHASH_PRECISION = 5;
 export const MAX_QUERY_PAGES = 10;
 export const MAX_QUERY_ITEMS = 500;
 
+const BATCH_GET_MAX_KEYS = 100;
+const BATCH_GET_MAX_ATTEMPTS = 5;
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 /** How many times a read-then-conditional-write is retried when the driver changed in between. */
 const MAX_ATTEMPTS = 3;
 
@@ -114,6 +119,33 @@ export class DriverRepo {
       throw err;
     }
     return driver;
+  }
+
+  /**
+   * Availability of each id that exists, via BatchGetItem (chunks of 100, consistent reads); unknown
+   * ids are absent from the map. Unprocessed keys are retried a bounded number of times, then it throws.
+   */
+  async availabilityOf(ids: readonly string[]): Promise<Map<string, Availability>> {
+    const found = new Map<string, Availability>();
+    for (let i = 0; i < ids.length; i += BATCH_GET_MAX_KEYS) {
+      let keys: Record<string, unknown>[] = ids.slice(i, i + BATCH_GET_MAX_KEYS).map((id) => driverKey(id));
+      for (let attempt = 0; keys.length > 0; attempt++) {
+        if (attempt === BATCH_GET_MAX_ATTEMPTS) throw new Error(`availabilityOf: ${keys.length} keys still unprocessed`);
+        if (attempt > 0) await sleep(2 ** attempt * 25); // back off before retrying throttled keys
+        const res = await this.doc.send(
+          new BatchGetCommand({
+            RequestItems: {
+              [this.tableName]: { Keys: keys, ConsistentRead: true, ProjectionExpression: 'id, #a', ExpressionAttributeNames: { '#a': 'availability' } },
+            },
+          }),
+        );
+        for (const item of res.Responses?.[this.tableName] ?? []) {
+          if (typeof item.id === 'string') found.set(item.id, item.availability as Availability);
+        }
+        keys = res.UnprocessedKeys?.[this.tableName]?.Keys ?? [];
+      }
+    }
+    return found;
   }
 
   async get(id: string): Promise<Driver | null> {

@@ -24,6 +24,10 @@ provider:
     # the functions build the management endpoint from it (Floci or AWS form).
     RIDECORE_WS_API_ID: !Ref WebsocketsApi
     RIDECORE_WS_STAGE: ${sls:stage}
+    # ridecore-location (Plan 7): empty keeps dispatch on DynamoDB. Lambdas run in Docker on Floci, so
+    # they use their own URL (http://host.docker.internal:8090, ridecore-location ADR 0001).
+    RIDECORE_LOCATION_URL: ${env:RIDECORE_LOCATION_LAMBDA_URL, ''}
+    RIDECORE_LOCATION_KEY: ${env:RIDECORE_LOCATION_KEY, ''}
   iam:
     role:
       statements:

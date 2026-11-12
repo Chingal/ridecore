@@ -4,6 +4,8 @@ import { Counter, Rate, Trend } from 'k6/metrics';
 
 export const API = (__ENV.API || '').replace(/\/+$/, '');
 export const WS = __ENV.WS || '';
+// Set on the Go path (make load LOCATION=1): ridecore-location's WebSocket base, e.g. ws://127.0.0.1:8090.
+export const LOC_WS = (__ENV.LOC_WS || '').replace(/\/+$/, '');
 
 export const metrics = {
   conflicts: new Counter('conflicts_409'),

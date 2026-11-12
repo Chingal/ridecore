@@ -1,14 +1,12 @@
 # ridecore Core (Plan 1 of 4) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Prove the toolchain on Floci, then build the trip core: domain state machine, DynamoDB persistence with transactions and outbox items, drivers and dispatch offers, auth/authorization, idempotency, HTTP API on Lambda (runnable locally), and CI.
 
 **Architecture:** Pure domain code (no AWS imports) in `src/domain`; DynamoDB single-table repositories in `src/infra/dynamo`; Lambda HTTP handlers in `src/http` that a local adapter (`src/local/server.ts`) can also serve. CDK owns stateful resources (`infra/cdk`); Serverless Framework owns functions (`serverless.yml`), reading CDK outputs one way only. Event delivery (outbox publisher, EventBridge, SQS, SNS) is Plan 2; this plan only writes outbox items.
 
 **Tech Stack:** Node.js 26.13.0+, TypeScript (strict, ESM), AWS SDK v3 (`@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`), AWS CDK v2, Serverless Framework (v4 or the OSS v3-compatible fork, decided in Task 0), Vitest, ESLint + typescript-eslint, zod, jose, ngeohash, Floci via Docker Compose, GitHub Actions.
 
-**Spec:** `docs/superpowers/specs/2026-11-09-ridecore-design.md`
+**Spec:** `docs/design/2026-11-09-ridecore-design.md`
 
 ## Global Constraints
 

@@ -139,7 +139,8 @@ async function setup(drivers: number, passengers: number, seed: number): Promise
           name: `Load driver ${n}`,
           vehicle: { plate: `LOAD${String(n).padStart(3, '0')}`, model: 'Load sedan', category: 'STANDARD' },
           availability: 'AVAILABLE',
-          position: d.position,
+          // Go path: positions live in ridecore-location only, so drivers never enter the DynamoDB index.
+          ...(process.env.LOCATION === '1' ? {} : { position: d.position }),
         });
       } catch (err) {
         if (err instanceof DomainError && err.code === 'DRIVER_ON_TRIP') throw new Error(`${d.id} is on a trip: run 'make load-teardown' first`, { cause: err });

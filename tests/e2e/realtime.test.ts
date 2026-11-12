@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, onTestFinished } from 'vitest';
 import type { Actor, LatLng, Trip } from '../../src/domain/trip.ts';
 import { signToken } from '../../src/http/auth.ts';
 import { createDeps } from '../../src/http/deps.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
 import type { ServerMessage } from '../../src/realtime/messages.ts';
+import { reportToLocation } from './helpers/location.ts';
 
 /**
  * Real time over the Floci WebSocket API (ADR 0005): a passenger watching the map sees a car, the
@@ -123,6 +124,9 @@ describe(`real time over WebSocket (${WS})`, () => {
     expect(car).toMatchObject({ schemaVersion: 1, category: 'STANDARD' });
     expect(JSON.stringify(p.messages)).not.toContain('Driver RT');
 
+    // Go path: the deployed dispatch looks drivers up in ridecore-location (no-op otherwise).
+    const stopReporting = await reportToLocation(drv.id, drv.token, ORIGIN);
+    onTestFinished(stopReporting);
     const created = await call('POST', '/trips', passenger, { origin: ORIGIN, destination: DESTINATION }, { 'idempotency-key': randomUUID() });
     expect(created.status).toBe(201);
     const trip = created.body as unknown as Trip;

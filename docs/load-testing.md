@@ -59,6 +59,42 @@ The k6 summary is saved as `.load/summary-<profile>-<time>.json`, which is git-i
 4. each trip's outbox events go 1..N;
 5. queues drain and DLQs do not grow.
 
+## The Go path (ridecore-location)
+
+The same profiles can run with driver positions and the live map in
+[ridecore-location](https://github.com/Chingal/ridecore-location), a Go service next to this repository
+(`LOCATION_DIR`, default `../ridecore-location`):
+
+```bash
+make up LOCATION=1                 # also Redis, Kafka and the Go service; the Lambdas get the switch on
+make load PROFILE=peak LOCATION=1  # same profiles, same checker
+make down                          # also stops the Go service
+```
+
+- **One switch: `RIDECORE_LOCATION_URL`.** `make up LOCATION=1` adds the location variables to
+  `.env.local` when they are missing (dev-only values; yours are never overwritten), deploys as usual,
+  then starts the service. Its log is `.load/location.log`, with a `stats` line every 10 s (map
+  messages sent and dropped, Kafka errors). The Lambdas run in Docker, so `make deploy-api` gives them
+  `RIDECORE_LOCATION_LAMBDA_URL` (default `http://host.docker.internal:8090`), but only while
+  `RIDECORE_LOCATION_URL` is set. `RIDECORE_LOCATION_URL= make deploy-api` turns the Lambdas off.
+- With the switch on, dispatch asks the service for the nearest 50 fresh drivers and keeps those
+  still `AVAILABLE` in DynamoDB (`src/infra/location/client.ts`).
+- **`make load` refuses a hybrid run.** It reads the deployed dispatch Lambda's configuration and
+  stops unless `LOCATION=1` matches it. It also stops before creating actors if the service does not
+  answer `/healthz`.
+- On the Go path drivers open two sockets: ridecore's, for offers and trip events only, and
+  ridecore-location's, for positions. Load drivers are created without a position in DynamoDB, so
+  they never enter the availability index. Watchers use the service's map socket. There
+  `map_messages` counts `cars` messages, one per watched cell per second, while ridecore's map sends
+  one message per car change. The two numbers are not comparable.
+- Trip assignments reach the service through the `ridecore-location-trips` queue (an EventBridge rule
+  for `trip.accepted`, `trip.completed` and `trip.cancelled`). On the Go path the checker reads that
+  queue and its DLQ too: 10 queues instead of 8.
+- **Known difference, not corrected:** with the DynamoDB index every load driver is a candidate from
+  setup on. On the Go path a driver becomes one when its socket sends a first position, during the
+  ramp. The first requests of a run therefore see fewer candidates on the Go path. Over a 5-minute
+  peak this is the first ramp minutes only, but it is not a perfectly equal start.
+
 ## Results (2026-11-11)
 
 **Setup:**

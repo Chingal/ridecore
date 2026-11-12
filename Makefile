@@ -14,10 +14,20 @@ LOCAL_PORT ?= 3000
 
 # Start Floci, deploy the stateful stack (CDK) and the API Lambda (osls), then seed demo data.
 # Idempotent: every step can run again on a live Floci.
+#
+# LOCATION=1 also brings up ridecore-location (Go, in $(LOCATION_DIR)): it adds the location variables
+# to .env.local if absent (so the Lambdas are deployed with the switch on), then starts Redis, Kafka and
+# the service once the stack's trip-assignments queue exists. Without it, nothing changes.
+LOCATION_DIR ?= ../ridecore-location
+export LOCATION_DIR
+LOCATION_SCRIPT = node --import ./scripts/load-env.ts scripts/location.ts
+
 up:
+	$(if $(filter 1,$(LOCATION)),@$(LOCATION_SCRIPT) env)
 	docker compose up -d --wait floci
 	$(MAKE) deploy
 	$(MAKE) seed
+	$(if $(filter 1,$(LOCATION)),@$(LOCATION_SCRIPT) start)
 
 deploy: deploy-stateful deploy-api
 
@@ -32,6 +42,8 @@ deploy-stateful:
 deploy-api: build
 	@set -e; $(LOAD_ENV); \
 	cdk_env=$$(node scripts/cdk-env.ts); eval "$$cdk_env"; \
+	eval "$$(node scripts/location.ts lambda-env)"; \
+	echo "ridecore-location for the Lambdas: $${RIDECORE_LOCATION_LAMBDA_URL:-off}"; \
 	$(FLOCI_ENV) npx serverless deploy; \
 	api_id=$$($(FLOCI_ENV) npx serverless info --verbose | sed -n 's/^ *HttpApiId: *//p'); \
 	test -n "$$api_id" || { echo "HttpApiId not found in serverless info" >&2; exit 1; }; \
@@ -50,7 +62,7 @@ build:
 # Packages the Lambdas without any AWS access (dummy credentials, no login, placeholder ARNs).
 # serverless.yml has no JWT secret or ARN defaults, so they come from the env policy and cdk-env here.
 package: build
-	$(LOAD_ENV) && eval "$$(node scripts/cdk-env.ts --dummy)" && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
+	$(LOAD_ENV) && eval "$$(node scripts/cdk-env.ts --dummy)" && eval "$$(node scripts/location.ts lambda-env)" && AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 npx serverless package
 
 seed:
 	npm run seed
@@ -80,6 +92,7 @@ e2e-local:
 	RIDECORE_API_URL=$$url npx vitest run --project e2e $(E2E_ARGS)
 
 down:
+	-@$(LOCATION_SCRIPT) stop
 	docker compose down
 
 test:
@@ -128,7 +141,7 @@ demo:
 PROFILE ?= smoke
 load:
 	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
-	@node --import ./scripts/load-env.ts scripts/load/run.ts $(PROFILE)
+	@LOCATION=$(LOCATION) node --import ./scripts/load-env.ts scripts/load/run.ts $(PROFILE)
 
 # Ends the load actors' trips and sets their drivers OFFLINE, e.g. after an interrupted run.
 load-teardown:

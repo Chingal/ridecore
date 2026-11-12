@@ -2,12 +2,14 @@
 //   drivers  - one WebSocket each, a position every 3 s; accept an offer push, then arrive/start/complete
 //   watchers - one WebSocket each, `watch` at their position, count map messages
 //   riders   - HTTP only: request a trip, wait for a driver, sometimes cancel, otherwise ride and rate
+// Go path (LOC_WS set): drivers also open ridecore-location's driver socket and send positions there
+// (none to ridecore), and watchers use its map socket, counting one `cars` message per cell per second.
 // Actors and tokens come from /data/actors.json (written by scripts/load/actors.ts, git-ignored).
 import exec from 'k6/execution';
 import { sleep } from 'k6';
 import { SharedArray } from 'k6/data';
 import { WebSocket } from 'k6/websockets';
-import { call, destinationFrom, metrics, randomKey, step, WS } from './lib.js';
+import { call, destinationFrom, LOC_WS, metrics, randomKey, step, WS } from './lib.js';
 
 const PROFILE_NAME = __ENV.PROFILE || 'smoke';
 const PROFILE = JSON.parse(open('./profiles.json'))[PROFILE_NAME];
@@ -53,9 +55,9 @@ function startDelay(index, count, isRider) {
 }
 
 /** Opens a socket with the ridecore subprotocol; records whether it was refused. */
-function openSocket(token, onOpen, onMessage, liveMs) {
+function openSocket(url, token, onOpen, onMessage, liveMs) {
   let opened = false;
-  const ws = new WebSocket(WS, ['ridecore.v1', token]);
+  const ws = new WebSocket(url, ['ridecore.v1', token]);
   ws.onopen = () => {
     opened = true;
     metrics.wsRefused.add(false);
@@ -93,14 +95,26 @@ export function drivers() {
     setTimeout(next, 2000 + Math.random() * 3000);
   };
 
+  const sendPositions = (ws) => {
+    const timer = setInterval(() => {
+      pos = step(pos);
+      ws.send(JSON.stringify({ action: 'position', lat: pos.lat, lng: pos.lng }));
+    }, 3000);
+    setTimeout(() => clearInterval(timer), (D - delay) * 1000);
+  };
+  if (LOC_WS) {
+    // Positions go to ridecore-location; ridecore's socket only carries offers and trip events.
+    openSocket(`${LOC_WS}/v1/drivers/ws`, me.token, (ws) => {
+      ws.send(JSON.stringify({ action: 'position', lat: pos.lat, lng: pos.lng }));
+      sendPositions(ws);
+    }, () => {}, (D - delay) * 1000);
+  }
+
   openSocket(
+    WS,
     me.token,
     (ws) => {
-      const timer = setInterval(() => {
-        pos = step(pos);
-        ws.send(JSON.stringify({ action: 'position', lat: pos.lat, lng: pos.lng }));
-      }, 3000);
-      setTimeout(() => clearInterval(timer), (D - delay) * 1000);
+      if (!LOC_WS) sendPositions(ws);
     },
     (_ws, msg) => {
       if (msg.type !== 'offer' || busy) return;
@@ -122,10 +136,11 @@ export function watchers() {
   // The crowded profile puts every watcher in one cell on purpose (Review Focus 4).
   const at = PROFILE_NAME === 'crowded' ? LOAD_CENTRE : me.position;
   openSocket(
+    LOC_WS ? `${LOC_WS}/v1/map/ws` : WS,
     me.token,
     (ws) => ws.send(JSON.stringify({ action: 'watch', lat: at.lat, lng: at.lng })),
     (_ws, msg) => {
-      if (msg.type === 'car' || msg.type === 'car.left') metrics.mapMessages.add(1);
+      if (msg.type === 'car' || msg.type === 'car.left' || msg.type === 'cars') metrics.mapMessages.add(1);
     },
     (D - delay) * 1000,
   );

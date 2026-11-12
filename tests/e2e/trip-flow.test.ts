@@ -1,12 +1,13 @@
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'node:crypto';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, onTestFinished } from 'vitest';
 import type { Actor, LatLng, Trip } from '../../src/domain/trip.ts';
 import { signToken } from '../../src/http/auth.ts';
 import { createDeps } from '../../src/http/deps.ts';
 import { BillingRepo } from '../../src/infra/dynamo/billing-repo.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
 import { ConsumedRepo } from '../../src/infra/dynamo/consumed-repo.ts';
+import { reportToLocation } from './helpers/location.ts';
 
 /**
  * Full trip over real HTTP. The target is `RIDECORE_API_URL`: the Floci-deployed Lambda behind the
@@ -123,6 +124,9 @@ describe(`trip flow over HTTP (${API})`, () => {
     expect(online.status).toBe(200);
     expect(online.body).toMatchObject({ id: drv.id, availability: 'AVAILABLE', position: ORIGIN });
 
+    // Go path: the deployed dispatch looks drivers up in ridecore-location (no-op otherwise).
+    const stopReporting = await reportToLocation(drv.id, drv.token, ORIGIN);
+    onTestFinished(stopReporting);
     const created = await call('POST', '/trips', passenger, { origin: ORIGIN, destination: DESTINATION }, { 'idempotency-key': randomUUID() });
     expect(created.status).toBe(201);
     const trip = tripOf(created);

@@ -1,6 +1,7 @@
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
 import type { SQSBatchResponse, SQSEvent } from 'aws-lambda';
 import { createDispatch, type Dispatch } from '../../app/dispatch.ts';
+import { locationFromEnv, nearbyOption } from '../../http/deps.ts';
 import { createDocumentClient, createDynamoClient } from '../../infra/dynamo/client.ts';
 import { DriverRepo } from '../../infra/dynamo/driver-repo.ts';
 import { tableNameFromEnv } from '../../infra/dynamo/keys.ts';
@@ -56,7 +57,10 @@ export const handler = (event: SQSEvent): Promise<SQSBatchResponse> => {
     const topicArn = process.env.RIDECORE_OFFERS_TOPIC_ARN;
     if (topicArn === undefined || topicArn === '') throw new Error('RIDECORE_OFFERS_TOPIC_ARN is not set');
     lambda = createDispatchConsumer({
-      dispatch: createDispatch({ trips: new TripRepo(doc, table), drivers: new DriverRepo(doc, table) }),
+      dispatch: (() => {
+        const drivers = new DriverRepo(doc, table);
+        return createDispatch({ trips: new TripRepo(doc, table), drivers, ...nearbyOption(locationFromEnv(), drivers) });
+      })(),
       publish: async (offer) => {
         await sns.send(new PublishCommand({ TopicArn: topicArn, Message: JSON.stringify(offer) }));
       },

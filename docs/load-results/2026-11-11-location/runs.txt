@@ -1,0 +1,32 @@
+# k6 summary lines, invariant check and Floci stream trims for each run (2026-11-11)
+
+## before
+  http_reqs: 12900
+  http_req_failed: 0.00%
+  http_req_duration: p50 6ms p95 21ms p99 247ms max 9293ms (n=12900)
+  offer_push_ms: p50 1034ms p95 1345ms p99 2004ms max 2297ms (n=438)
+  time_to_accept_ms: p50 20081ms p95 36177ms p99 38169ms max 38174ms (n=102)
+  trips_completed: 85
+  trips_unaccepted: 330
+  app_errors: no samples
+  map_messages: 113131
+  ws_refused: 0.00%
+load check: read 432 trips, 100 drivers, 8 queues; 67 violation(s)
+  floci stream 'checkpoint ... was trimmed' warnings: 524
+
+## after
+  http_reqs: 11746
+  http_req_failed: 1.88%
+  http_req_duration: p50 8ms p95 389ms p99 10001ms max 10005ms (n=11746)
+  offer_push_ms: p50 1028ms p95 1534ms p99 2000ms max 9174ms (n=760)
+  time_to_accept_ms: p50 38169ms p95 43201ms p99 46303ms max 48181ms (n=150)
+  trips_completed: 129
+  trips_unaccepted: 254
+  app_errors: 221
+  map_messages: 24080
+  ws_refused: 0.00%
+load check: read 416 trips, 100 drivers, 8 queues; 73 violation(s)
+  floci stream 'checkpoint ... was trimmed' warnings: 457
+
+## ridecore-location stats (last line of the after run)
+{"time":"2026-11-11T18:14:14.162573404-05:00","level":"INFO","msg":"stats","mapCars":0,"mapSent":24126,"mapDropped":0,"kafkaErrors":2}

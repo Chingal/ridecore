@@ -1,14 +1,12 @@
 # MCP Server Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** A stdio MCP server that lets an AI agent request a trip, check its status, cancel it and list the passenger's trips by calling the real ridecore HTTP API with one passenger token.
 
 **Architecture:** `src/mcp/` holds three layers: an HTTP client for the four passenger routes (`api-client.ts`), the tool definitions that turn API trips into small summaries and API errors into readable tool errors (`tools.ts`), and a stdio entry point (`main.ts`). The server never touches DynamoDB; the API's per-resource authorization applies unchanged. Nothing here ships in the Lambda bundle.
 
 **Tech Stack:** Node.js 26 (TypeScript run natively, as the rest of the repo), `@modelcontextprotocol/sdk` 1.32.x (`McpServer`, `StdioServerTransport`; `Client`, `InMemoryTransport`, `StdioClientTransport` in tests), zod 4 (already a dependency), Vitest.
 
-**Spec:** `docs/superpowers/specs/2026-11-09-ridecore-design.md` (§2 goal 3, §5 "Authorization per resource", §7 "MCP server"), and `docs/decisions/0003-mcp-tool-design.md` (proposed; this plan implements it and marks it accepted).
+**Spec:** `docs/design/2026-11-09-ridecore-design.md` (§2 goal 3, §5 "Authorization per resource", §7 "MCP server"), and `docs/decisions/0003-mcp-tool-design.md` (proposed; this plan implements it and marks it accepted).
 
 ## Global Constraints
 

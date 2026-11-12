@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Trip, TripState } from '../../../src/domain/trip.ts';
-import { evaluate, exitCode, type Snapshot } from '../../../scripts/load/check.ts';
+import { evaluate, exitCode, queueUrls, requiredQueueCount, type Snapshot } from '../../../scripts/load/check.ts';
 
 const trip = (id: string, state: TripState, version: number, over: Partial<Trip> = {}): Trip =>
   ({ id, passengerId: 'load-passenger-1', state, version, ...over }) as Trip;
@@ -97,5 +97,28 @@ describe('exitCode', () => {
     // Missing queue settings or drivers mean part of the check never ran.
     expect(exitCode({ read: { trips: 3, drivers: 2, queues: 0 }, violations: [] })).toBe(1);
     expect(exitCode({ read: { trips: 3, drivers: 0, queues: 8 }, violations: [] })).toBe(1);
+  });
+});
+
+describe('queues on the Go path', () => {
+  const env = {
+    RIDECORE_DISPATCH_QUEUE_URL: 'q/d', RIDECORE_DISPATCH_DLQ_URL: 'q/d-dlq', RIDECORE_BILLING_QUEUE_URL: 'q/b', RIDECORE_BILLING_DLQ_URL: 'q/b-dlq',
+    RIDECORE_DRIVER_OFFERS_QUEUE_URL: 'q/o', RIDECORE_DRIVER_OFFERS_DLQ_URL: 'q/o-dlq', RIDECORE_NOTIFICATIONS_QUEUE_URL: 'q/n', RIDECORE_NOTIFICATIONS_DLQ_URL: 'q/n-dlq',
+    RIDECORE_LOCATION_TRIPS_QUEUE_URL: 'q/l', RIDECORE_LOCATION_TRIPS_DLQ_URL: 'q/l-dlq',
+  };
+
+  it('also reads the ridecore-location trip-assignments queue and its DLQ when LOCATION=1', () => {
+    expect(queueUrls({ ...env, LOCATION: '1' }).map((q) => q.name)).toEqual(expect.arrayContaining(['location-trips', 'location-trips-dlq']));
+    expect(requiredQueueCount({ LOCATION: '1' })).toBe(10);
+  });
+
+  it('reads the same 8 queues as before when the path is off', () => {
+    expect(queueUrls(env).map((q) => q.name)).not.toContain('location-trips');
+    expect(requiredQueueCount({})).toBe(8);
+  });
+
+  it('fails a Go-path check that read fewer than 10 queues', () => {
+    expect(exitCode({ read: { trips: 3, drivers: 2, queues: 8 }, violations: [] }, 10)).toBe(1);
+    expect(exitCode({ read: { trips: 3, drivers: 2, queues: 10 }, violations: [] }, 10)).toBe(0);
   });
 });

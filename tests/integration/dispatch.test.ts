@@ -450,3 +450,23 @@ describe('dispatch (DynamoDB on Floci)', () => {
     }
   });
 });
+
+describe('DriverRepo.availabilityOf', () => {
+  // Review Focus 3: more ids than one BatchGetItem allows (100), most of them unknown.
+  it('returns the availability of the drivers that exist, across batches', async () => {
+    const available = await seedDriver(north(LETICIA, 0));
+    const offline = await seedDriver(north(LETICIA, 0.1), 'OFFLINE');
+    const unknown = Array.from({ length: 118 }, (_, i) => `missing-${i}-${randomUUID()}`);
+    const ids = [...unknown.slice(0, 60), available, ...unknown.slice(60), offline];
+    expect(ids).toHaveLength(120);
+    const got = await drivers.availabilityOf(ids);
+    expect(Object.fromEntries(got)).toEqual({ [available]: 'AVAILABLE', [offline]: 'OFFLINE' });
+  });
+
+  it('reads nothing for no ids', async () => {
+    expect((await drivers.availabilityOf([])).size).toBe(0);
+  });
+});
+
+// Used only by the availabilityOf tests, far from every other city in this file.
+const LETICIA: LatLng = { lat: -4.2153, lng: -69.9406 };

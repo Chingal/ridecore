@@ -46,3 +46,47 @@ Changes 1 to 3 come first: they are cheap, and they turn the worst failure (even
 
 - `make load` and its invariant checker stay in the repo. Rerun them after each change above: `peak` should show offers and billing for every trip once change 1 or 2 is in.
 - Nothing here was measured on AWS. A real-AWS test needs a staging account, a cost estimate and the owner's approval. It would add the numbers this laptop cannot give: real latency, `IteratorAge`, throttling and cost per trip.
+
+## Results: change 6 built (2026-11-11)
+
+Change 6 is [ridecore-location](https://github.com/Chingal/ridecore-location), a Go service with
+positions in Redis and Kafka, behind the `RIDECORE_LOCATION_URL` switch (docs/load-testing.md, "The
+Go path"). Both runs below used the same laptop and the same Floci, minutes apart, with the Go stack
+running in both (idle in "before"). Profile `peak`: 100 drivers, 200 passengers.
+Raw numbers: `docs/load-results/2026-11-11-location/`.
+
+| `peak` | Before (switch off) | After (Go path) |
+|---|---|---|
+| Trips created | 432 | 416 |
+| Got an offer | 124 (29 %) | **177 (43 %)** |
+| Finished | 85 | **130** |
+| Finished with a billing record | 19 (22 %) | **61 (47 %)** |
+| Invariant violations (all "finished, no billing record") | 67 | 73 |
+| Floci "checkpoint was trimmed" warnings | 524 | 457 |
+| HTTP requests failed | 0 % | 1.88 % (p99 10 s) |
+
+**What it shows:**
+- Taking positions out of the trip table roughly doubles the trips that finish and the share that are
+  billed, and raises offers from 29 % to 43 %. Finding 1's cause was real.
+- It does **not** reach the target of every trip offered and billed. Floci still trims the table
+  stream, now with trip traffic alone. On this emulator the outbox stream, not positions, is the
+  bottleneck. The violation count barely moves because far more trips finish, and the same bottleneck
+  then leaves more of them unbilled.
+- The 1.88 % failed requests in the after run are not explained. The 10 s ceiling is the Lambda
+  timeout. The working guess is Floci saturating under more trips in progress (arrive, start,
+  complete, rate). It is a guess, not a measurement.
+
+**What it means for the order of changes:**
+- Changes 1 and 2 (publisher batch size, outbox reconciler) are now the next step. Change 2 in
+  particular makes a lost or late `trip.requested` or `trip.completed` recoverable on any platform,
+  which is exactly what is still failing.
+- On AWS the hypothesis stays the same: DynamoDB Streams keeps records for 24 h, so the same pressure
+  would show as `IteratorAge` and delay, not loss. This laptop cannot confirm it.
+
+**Limits of this comparison:**
+- On the Go path a load driver becomes a candidate at its first position, during the ramp. On the
+  DynamoDB path it is one from setup on.
+- `map_messages` counts different things on each path (cars vs one message per cell per second).
+- The runs were made at ridecore `3c538c8` and ridecore-location `ded4c95`. The fixes that came after
+  them (a Codex review: one switch, the checker reading the location queue, how trip events are
+  retried) do not change the measured paths.

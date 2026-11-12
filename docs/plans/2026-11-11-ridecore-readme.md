@@ -1,14 +1,12 @@
 # README, ADRs and Demo Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Make the repo pass the spec's "first 2 minutes" test (§6): a first screen with badges, a Mermaid diagram and one command to run; the missing ADRs; and proof that it works (a scripted trip with its real output, a live-map screenshot, and a real agent requesting a trip through MCP).
 
 **Architecture:** One new script (`scripts/demo-trip.ts`, `make demo`) drives a full trip through the HTTP API and prints each step. Coverage runs with Vitest's V8 provider (`make coverage`) and goes to the CI job summary. Everything else is documentation built from real runs: the screenshot and the agent transcript are captured, never written by hand.
 
 **Tech Stack:** Node 26 TypeScript scripts, `@vitest/coverage-v8` 5.1.0 (dev), GitHub Actions, Mermaid in GitHub Markdown, Claude Code CLI (`claude -p`) for the agent example.
 
-**Spec:** `docs/superpowers/specs/2026-11-09-ridecore-design.md` §6 (what a reader sees first), §7 ("`make demo` runs the scripted trip"), §9 step 4.
+**Spec:** `docs/design/2026-11-09-ridecore-design.md` §6 (what a reader sees first), §7 ("`make demo` runs the scripted trip"), §9 step 4.
 
 ## Global Constraints
 

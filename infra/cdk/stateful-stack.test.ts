@@ -54,8 +54,8 @@ describe('StatefulStack', () => {
   });
 
   it('defines each consumer queue with a DLQ: 3 receives, 60 s visibility, 14-day DLQ retention', () => {
-    template.resourceCountIs('AWS::SQS::Queue', 9);
-    for (const name of ['ridecore-dispatch', 'ridecore-billing', 'ridecore-driver-offers', 'ridecore-notifications']) {
+    template.resourceCountIs('AWS::SQS::Queue', 11);
+    for (const name of ['ridecore-dispatch', 'ridecore-billing', 'ridecore-driver-offers', 'ridecore-notifications', 'ridecore-location-trips']) {
       template.hasResourceProperties('AWS::SQS::Queue', { QueueName: `${name}-dlq`, MessageRetentionPeriod: 1209600 });
       template.hasResourceProperties('AWS::SQS::Queue', {
         QueueName: name,
@@ -69,7 +69,7 @@ describe('StatefulStack', () => {
     const rules = Object.values(template.findResources('AWS::Events::Rule')).map(
       (r) => r.Properties as { EventPattern: unknown; Targets: { Arn: unknown }[] },
     );
-    expect(rules).toHaveLength(3);
+    expect(rules).toHaveLength(4);
     const targetOf = (type: string) => {
       const rule = rules.find((r) => JSON.stringify(r.EventPattern) === JSON.stringify({ source: ['ridecore.trips'], 'detail-type': [type] }));
       expect(rule, type).toBeDefined();
@@ -87,6 +87,18 @@ describe('StatefulStack', () => {
     expect(all).toHaveLength(1);
     expect(JSON.stringify(all[0]?.Targets)).toContain('NotificationsQueue');
     expect(JSON.stringify(all[0]?.EventBusName)).toContain('EventBus');
+  });
+
+  it('routes trip assignments (accepted, completed, cancelled) to the ridecore-location queue', () => {
+    const rules = Object.values(template.findResources('AWS::Events::Rule')).map(
+      (r) => r.Properties as { EventPattern: unknown; EventBusName: unknown; Targets: { Arn: unknown }[] },
+    );
+    const pattern = { source: ['ridecore.trips'], 'detail-type': ['trip.accepted', 'trip.completed', 'trip.cancelled'] };
+    const rule = rules.find((r) => JSON.stringify(r.EventPattern) === JSON.stringify(pattern));
+    expect(rule).toBeDefined();
+    expect(JSON.stringify(rule?.Targets)).toContain('LocationTripsQueue');
+    expect(JSON.stringify(rule?.EventBusName)).toContain('EventBus');
+    template.hasOutput('LocationTripsQueueUrl', {});
   });
 
   it('fans driver offers out from an SNS topic to the driver-offers queue as raw messages', () => {
