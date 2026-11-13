@@ -13,10 +13,10 @@
 ## Global Constraints
 
 - Node 26, TypeScript, existing patterns: `createX(deps)` + lazy `handler`, `jsonLog`.
-- The event body must not change: `Detail` is every item attribute except `PK`, `SK`, `entity`, `GSI2PK`, `GSI2SK`, `publishedAt`.
+- The event body must not change: `Detail` is every item attribute except `PK`, `SK`, `entity`, `GSI2PK`, `GSI2SK`, `publishedAt`, `outboxAttempts`.
 - `GSI2PK = OUTBOX#<shard>`, shard = stable hash of `tripId` mod `OUTBOX_SHARDS` (10); `GSI2SK = <occurredAt>#<tripId>#<version padded 6>`.
 - Clear = `UpdateItem REMOVE GSI2PK, GSI2SK SET publishedAt`, `ConditionExpression: attribute_exists(PK)`; a missing item is ignored.
-- Reconciler: schedule every 1 minute, age threshold 60 s, cap 500 events per run split fairly: 50 per shard, the run starting at shard `minuteOfHour % 10` (rotation), a failing shard never blocks the others. PutEvents ≤ 10 per call, never two events of one trip in a call.
+- Reconciler: schedule every 1 minute, age threshold 60 s, cap 500 events per run split fairly: 50 per shard, the run starting at shard `minuteOfHour % 10` (rotation), a failing shard never blocks the others. An entry that is rejected or has no result keeps its marker but is **moved to the back of its shard** (`GSI2SK` rewritten with the current time, `outboxAttempts` + 1), so a stuck entry never fills the shard's budget forever. PutEvents ≤ 10 per call, never two events of one trip in a call.
 - Scope: recovery covers events written after this deploys (only they carry the marker). Older lost events are out of scope; say so in ADR 0008.
 - "About two minutes" is an objective, not a guarantee (caps, retries, GSI eventual consistency, schedule delay); ADR 0008 says so.
 - A failed clear never fails the stream batch: log and move on.
@@ -47,7 +47,7 @@
   - `golden Detail`: for the fixed item `{ schemaVersion:1, eventId:'t-1:1', type:'trip.requested', tripId:'t-1', version:1, occurredAt:'2026-11-10T12:00:00.000Z', payload:{fromState:null,toState:'REQUESTED',passengerId:'p-1',fareEstimate:7000}, correlationId:'c-1', PK:'TRIP#t-1', SK:'EVENT#000001', entity:'EVENT' }`, `Detail` equals the exact JSON string the publisher produces today (copy it from a run of the current `outboxEntries` before refactoring).
   - `strips index and debug attributes`: the same item plus `GSI2PK`, `GSI2SK`, `publishedAt` gives the identical `Detail`, and `key` is `{ PK:'TRIP#t-1', SK:'EVENT#000001' }`.
 - [ ] **Step 2: Run** — Expected: FAIL (module missing).
-- [ ] **Step 3: Implement** `buildEntry` (the stripping set is exactly the six names in Global Constraints) and switch `outboxEntries` to it.
+- [ ] **Step 3: Implement** `buildEntry` (the stripping set is exactly the seven names in Global Constraints) and switch `outboxEntries` to it.
 - [ ] **Step 4: Run** `make test` — Expected: new tests and all existing publisher tests PASS unchanged.
 - [ ] **Step 5: Commit** `refactor: shared outbox entry builder, strips index attributes`
 
@@ -66,7 +66,7 @@
   - `outboxPendingGsi2 keys`: `outboxPendingGsi2('t-1', '2026-11-13T10:00:00.000Z', 3)` → `{ GSI2PK: \`OUTBOX#${outboxShard('t-1')}\`, GSI2SK: '2026-11-13T10:00:00.000Z#t-1#000003' }`.
 - [ ] **Step 2: Run** `npx vitest run --project unit tests/unit/infra/keys.test.ts` — Expected: FAIL (not exported).
 - [ ] **Step 3: Implement** in `keys.ts`. `outboxShard`: FNV-1a 32-bit over the UTF-8 bytes of `tripId`, unsigned, `% OUTBOX_SHARDS`. Then in `putOutbox` spread `outboxPendingGsi2(event.tripId, event.occurredAt, event.version)` into the item.
-- [ ] **Step 4: Add the integration test** in `trip-repo.test.ts`: `a new outbox event is in the pending index` — create a trip, query GSI2 with `GSI2PK = outboxPendingPk(outboxShard(trip.id))` and keep the items whose `tripId` is `trip.id`; expect exactly the `EVENT#000001` item, with `GSI2SK` = `outboxPendingGsi2(trip.id, <its occurredAt>, 1).GSI2SK`. Also assert `deps.trips.get(trip.id)` has no `GSI2PK`.
+- [ ] **Step 4: Add the integration test** in `trip-repo.test.ts`: `a new outbox event is in the pending index` — create a trip, query GSI2 with `GSI2PK = outboxPendingPk(outboxShard(trip.id))` and keep the items whose `tripId` is `trip.id`; expect exactly the `EVENT#000001` item, with `GSI2SK` = `outboxPendingGsi2(trip.id, <its occurredAt>, 1).GSI2SK`. Also assert `await repo.get(trip.id)` has no `GSI2PK`.
 - [ ] **Step 5: Run** `make test` and `npx vitest run --project integration tests/integration/trip-repo.test.ts` (Floci up) — Expected: PASS.
 - [ ] **Step 6: Commit** `feat: pending marker (sparse GSI2) on outbox items`
 
@@ -80,7 +80,8 @@
 - Consumes: `outboxPendingPk`, `OUTBOX_SHARDS`, `GSI2` from Task 2; `OutboxKey` from Task 1.
 - Produces: `createOutboxStore(doc: DynamoDBDocumentClient, table: string): OutboxStore` with
   `pending(shard: number, before: string, limit: number): Promise<Record<string, unknown>[]>` (GSI2, `GSI2PK = OUTBOX#shard AND GSI2SK < :before`, ascending, follows `LastEvaluatedKey` until `limit` items or no more pages) and
-  `clear(key: OutboxKey, publishedAt: string): Promise<void>` (REMOVE `GSI2PK, GSI2SK`, SET `publishedAt`, condition `attribute_exists(PK)`; `ConditionalCheckFailedException` → return).
+  `clear(key: OutboxKey, publishedAt: string): Promise<void>` (REMOVE `GSI2PK, GSI2SK`, SET `publishedAt`, condition `attribute_exists(PK)`; `ConditionalCheckFailedException` → return) and
+  `defer(key: OutboxKey, gsi2sk: string): Promise<void>` (SET `GSI2SK = :sk`, ADD `outboxAttempts :one`, condition `attribute_exists(GSI2PK)`; a failed condition → return).
 
 - [ ] **Step 1: Write the failing integration tests** (test table via `createTestTable`):
   - `pending returns only markers older than the cut, oldest first` (three items with `occurredAt` T-120 s, T-90 s, T-10 s; cut T-60 s → first two, in that order).
@@ -89,6 +90,8 @@
 - [ ] **Step 1b: Unit test** `tests/unit/infra/outbox-store.test.ts`: `pending follows LastEvaluatedKey` with a fake `doc.send` returning two pages (3 + 2 items, the first with `LastEvaluatedKey`) → 5 items, second query carries `ExclusiveStartKey`; and stops at `limit` without asking for another page.
   - `clear removes the marker and stamps publishedAt` (item gone from `pending`, `publishedAt` set, `PK/SK` intact).
   - `clear ignores a missing item` (resolves, no item created).
+  - `defer moves the marker to the back` (item no longer returned for an old cut, returned for a cut after the new time; `outboxAttempts` 1).
+  - `outboxAttempts` and `publishedAt` never reach `Detail`: add `outboxAttempts` to the builder's stripped set (Task 1) and to its golden test.
 - [ ] **Step 2: Run** `npx vitest run --project integration tests/integration/outbox-store.test.ts` — Expected: FAIL.
 - [ ] **Step 3: Implement** `outbox-store.ts`. The "missing item" case must not create an item (that is what the condition is for).
 - [ ] **Step 4: Run** the same command — Expected: PASS.
@@ -109,7 +112,7 @@
   - `does not clear a rejected entry or anything after it` (first entry `ErrorCode` → no clear for it or later ones; same `batchItemFailures` as today).
   - `a failed clear is logged and the batch still succeeds` (`clear` rejects → result `{ batchItemFailures: [] }`, one log `{ level:'warn', msg:'outbox marker not cleared', correlationId }`).
 - [ ] **Step 2: Run** `npx vitest run --project unit tests/unit/events/publisher.test.ts` — Expected: FAIL.
-- [ ] **Step 3: Implement.** Clear after each chunk's results are checked, accepted entries only, errors caught per entry. In `handler`, build the store from `createDocumentClient(createDynamoClient())` and `RIDECORE_TABLE`, `publishedAt = now().toISOString()`.
+- [ ] **Step 3: Implement.** Clear after each chunk's results are checked, accepted entries only, errors caught per entry. Update every existing `createPublisher({...})` call in `publisher.test.ts` (e.g. line 76) with a no-op `clear` and a fixed `now`, so typecheck passes. In `handler`, build the store from `createDocumentClient(createDynamoClient())` and `RIDECORE_TABLE`, `publishedAt = now().toISOString()`.
 - [ ] **Step 4: Run** `make test` — Expected: PASS.
 - [ ] **Step 5: Commit** `feat: stream publisher clears the outbox marker after PutEvents`
 
@@ -120,14 +123,16 @@
 - Test: `tests/unit/events/reconciler.test.ts`, `tests/integration/reconciler.test.ts`
 
 **Interfaces:**
-- Consumes: `buildEntry`, `chunkEntries` (Task 1); `OutboxStore` (Task 3); `OUTBOX_SHARDS` (Task 2).
+- Consumes: `buildEntry`, `chunkEntries` (Task 1); `OutboxStore` (`pending`, `clear`, `defer`; Task 3); `OUTBOX_SHARDS`, `outboxPendingGsi2` (Task 2).
 - Produces: `type ReconcileSummary = { found: number; published: number; failed: number; oldestAgeSeconds: number }`;
-  `createReconciler(deps: { store: Pick<OutboxStore,'pending'|'clear'>; send: PublisherDeps['send']; busName: string; log: Logger; now: () => Date; ageSeconds?: number /*60*/; maxPerRun?: number /*500*/ }): () => Promise<ReconcileSummary>`; lazy `handler` (bundled as `reconciler`).
+  `createReconciler(deps: { store: Pick<OutboxStore,'pending'|'clear'|'defer'>; send: PublisherDeps['send']; busName: string; log: Logger; now: () => Date; ageSeconds?: number /*60*/; maxPerRun?: number /*500*/ }): () => Promise<ReconcileSummary>`; lazy `handler` (bundled as `reconciler`).
 
 - [ ] **Step 1: Write the failing unit tests** (fake store, fake send, fixed `now`):
   - `queries every shard with the cut now-60s` (10 `pending` calls, `before` = `now - 60 s` ISO).
   - `publishes in chunks of at most 10, never two of one trip in a call` (12 events, two of one trip).
-  - `clears only accepted entries` (one `ErrorCode` → not cleared, counted in `failed`; others cleared).
+  - `clears only accepted entries` (one `ErrorCode` → not cleared, deferred, counted in `failed`; others cleared).
+  - `a missing result is a failure` (`send` resolves `[]` → nothing cleared, every entry deferred and counted in `failed`).
+  - `a stuck entry does not block newer ones across runs` (a shard with 50 entries rejected every run plus 1 newer entry: by the second run the newer one is published).
   - `splits the cap fairly` (`maxPerRun` 500 → each shard asked with `limit` 50).
   - `rotates the starting shard` (`now` at minute 23 → first `pending` call is shard 3).
   - `a failing shard does not starve the others` (shard 0's `send` throws every run → shards 1-9 still published and cleared; shard 0 counted in `failed`; run resolves).
@@ -158,14 +163,22 @@
 - Modify: `Makefile` (target `outbox-demo`, same guard as `dlq-demo`), `README.md` (a section next to the DLQ demo)
 
 **Interfaces:**
-- Produces: `withStreamDisabled<T>(toggle: (enabled: boolean) => Promise<void>, fn: () => Promise<T>, signals: Pick<NodeJS.EventEmitter,'once'|'off'> = process): Promise<T>` — disables, runs `fn`, enables in `finally`; on SIGINT enables, then exits 130.
+- Produces: `withStreamDisabled<T>(toggle: (enabled: boolean) => Promise<void>, fn: (signal: AbortSignal) => Promise<T>, signals: Pick<NodeJS.EventEmitter,'once'|'off'> = process): Promise<T>` — disables, runs `fn`, enables in `finally`. On SIGINT it aborts `signal`, **waits for `fn` to settle** (so `fn`'s own `finally` deletes the rule and queue), enables, then the caller exits 130.
 
-- [ ] **Step 1: Write the failing unit tests:** `re-enables after success`, `re-enables after fn throws` (error rethrown), toggle call order `[false, true]`, `re-enables on SIGINT` (fake emitter emits SIGINT while `fn` is pending → toggle `true` called; exit stubbed).
+- [ ] **Step 1: Write the failing unit tests:** `re-enables after success`, `re-enables after fn throws` (error rethrown), toggle call order `[false, true]`, `on SIGINT, cleanup runs before re-enabling` (fake emitter emits SIGINT while `fn` is pending; `fn` reacts to the abort and records its cleanup → order is `[toggle false, cleanup, toggle true]`).
 - [ ] **Step 2: Run** — Expected: FAIL.
 - [ ] **Step 3: Implement** the script: find the publisher's mapping (`ListEventSourceMappings` for the deployed `publisher` function name), `withStreamDisabled` around: wait until the mapping state is `Disabled`; create the temporary SQS queue (with a resource policy allowing `events.amazonaws.com` to `sqs:SendMessage` from the rule) and a temporary rule for `detail-type: trip.requested` from `EVENT_SOURCE` **before** creating the trip (the API generates the id), then filter received messages by the new trip id; sign a passenger token with `RIDECORE_JWT_SECRET`, `POST /trips` with an `idempotency-key`; poll the queue printing `t=…s`; print `trip.requested published by the reconciler after N s`; delete rule and queue in `finally`. Timeout 4 min.
 - [ ] **Step 4: Run** `make test` (unit PASS) and `make outbox-demo` on Floci — Expected: arrival between 60 and ~130 s; afterwards the mapping is `Enabled` (check with `aws lambda list-event-source-mappings` or the script's last line).
 - [ ] **Step 5:** Paste a real run into the README section, like the DLQ demo.
 - [ ] **Step 6: Commit** `feat: make outbox-demo`
+
+### Task 7b: Consumer audit for late and duplicate events (design, "Ordering")
+
+**Files:** read `src/events/consumers/*.ts`, `src/app/dispatch.ts`, the billing and notifier paths, and `../ridecore-location` (its SQS trip consumer). Fixes, if any, go in the consumer's own file with a unit test.
+
+- [ ] **Step 1:** For each consumer (dispatch, billing, driver-offers, notifier, ridecore-location), answer two questions with a file:line: what a **duplicate** of each event it handles does, and what a **late** event does (e.g. `trip.requested` arriving after `trip.accepted` / `trip.cancelled`).
+- [ ] **Step 2:** For any answer that is not "ignored" or "idempotent", write the failing unit test reproducing it, fix it, run `make test` (and `go test ./...` in ridecore-location if touched; private repo, no push).
+- [ ] **Step 3:** Record the table in ADR 0008 (Task 8). Commit `fix: <consumer> ignores late events` per fix, or nothing if the audit finds none.
 
 ### Task 8: ADR 0008 and trade-offs
 
