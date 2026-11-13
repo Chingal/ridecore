@@ -185,4 +185,21 @@ describe('publisher clears the outbox marker', () => {
       expect.objectContaining({ level: 'warn', msg: 'outbox marker not cleared', correlationId: 'c-9' }),
     ]);
   });
+
+  it('clears the accepted entries of a chunk concurrently, so a slow clear does not stretch the batch', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const send = (entries: PutEventsRequestEntry[]) => Promise.resolve(ok(entries));
+    const clear = async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight -= 1;
+    };
+    await createPublisher({ send, busName: BUS, log: () => undefined, clear, now: () => NOW })({
+      Records: [outbox('1', 'a', 1), outbox('2', 'b', 1), outbox('3', 'c', 1)],
+    });
+    expect(maxInFlight).toBe(3);
+  });
 });
+

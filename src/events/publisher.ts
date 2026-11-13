@@ -77,6 +77,8 @@ export function createPublisher(deps: PublisherDeps): (event: DynamoDBStreamEven
   return async (event) => {
     for (const chunk of chunkEntries(outboxEntries(event.Records, deps.busName))) {
       const results = await deps.send(chunk.map((e) => e.entry));
+      const accepted: OutboxEntry[] = [];
+      let rejected: OutboxEntry | undefined;
       for (const [i, item] of chunk.entries()) {
         const result = results[i];
         if (result === undefined || result.ErrorCode !== undefined) {
@@ -87,11 +89,15 @@ export function createPublisher(deps: PublisherDeps): (event: DynamoDBStreamEven
             correlationId: item.correlationId,
             errorCode: result?.ErrorCode ?? 'MISSING_RESULT',
           });
-          return { batchItemFailures: [{ itemIdentifier: item.sequenceNumber }] };
+          rejected = item;
+          break;
         }
         deps.log({ level: 'info', msg: 'event published', detailType: item.entry.DetailType, correlationId: item.correlationId });
-        await clearMarker(deps, item);
+        accepted.push(item);
       }
+      // Clears run side by side: each one only logs on failure, and none may hold the batch up.
+      await Promise.all(accepted.map((item) => clearMarker(deps, item)));
+      if (rejected !== undefined) return { batchItemFailures: [{ itemIdentifier: rejected.sequenceNumber }] };
     }
     return { batchItemFailures: [] };
   };
