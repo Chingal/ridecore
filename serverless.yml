@@ -101,6 +101,14 @@ functions:
                   entity:
                     S: [EVENT]
 
+  # Outbox safety net (ADR 0008, change 2): every minute, publishes outbox events still marked
+  # pending after 60 s (a stream record that was dropped or is late) and clears their marker.
+  reconciler:
+    handler: dist/reconciler.handler
+    timeout: 60
+    events:
+      - schedule: rate(1 minute)
+
   # SQS consumers; each queue and its DLQ belong to the CDK stack (3 receives, then the DLQ).
   dispatch:
     handler: dist/dispatch.handler

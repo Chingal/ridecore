@@ -5,7 +5,7 @@ import { build } from 'esbuild';
 rmSync('dist', { recursive: true, force: true });
 
 /**
- * Bundles each Lambda entry (the API, the outbox publisher, the SQS consumers, the WebSocket routes and
+ * Bundles each Lambda entry (the API, the outbox publisher and reconciler, the SQS consumers, the WebSocket routes and
  * the positions stream handler) into one ESM
  * file per function in `dist/`, for the `nodejs24.x` runtime.
  * The AWS SDK v3 stays external: the Lambda runtime ships it (checked on Floci's
@@ -16,6 +16,7 @@ await build({
   entryPoints: {
     lambda: 'src/http/lambda.ts',
     publisher: 'src/events/publisher.ts',
+    reconciler: 'src/events/reconciler.ts',
     dispatch: 'src/events/consumers/dispatch.ts',
     'driver-offers': 'src/events/consumers/driver-offers.ts',
     billing: 'src/events/consumers/billing.ts',
