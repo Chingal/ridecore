@@ -181,6 +181,20 @@ describe('reconciler', () => {
     expect(summary).toMatchObject({ found: 2, published: 1, failed: 1 });
   });
 
+  it('a call that throws is retried entry by entry: healthy entries go out, the bad one is deferred', async () => {
+    const mem = memoryStore();
+    const [good1, bad, good2] = [tripInShard(4), tripInShard(4), tripInShard(4)];
+    mem.add(good1, ago(300));
+    mem.add(bad, ago(250));
+    mem.add(good2, ago(200));
+    const send = (entries: PutEventsRequestEntry[]) =>
+      entries.some((e) => tripOf(e) === bad) ? Promise.reject(new Error('ValidationException')) : Promise.resolve(entries.map(() => ({ EventId: 'e' })));
+    const summary = await createReconciler({ store: mem.store, send, busName: BUS, log: () => undefined, now: () => NOW })();
+    expect(mem.cleared).toEqual([outboxKey(good1, 1), outboxKey(good2, 1)]);
+    expect(mem.deferred).toEqual([outboxKey(bad, 1)]);
+    expect(summary).toMatchObject({ found: 3, published: 2, failed: 1 });
+  });
+
   it('logs one summary', async () => {
     const mem = memoryStore();
     mem.add(tripInShard(6), ago(150));

@@ -41,6 +41,35 @@ export function createReconciler(deps: ReconcilerDeps): () => Promise<ReconcileS
     let oldest: string | undefined;
     const first = now.getUTCMinutes() % OUTBOX_SHARDS;
 
+    /** Publishes one chunk. A call that throws is retried entry by entry, so one bad entry cannot hold its chunk-mates back. */
+    const publish = async (chunk: Pending[], shard: number): Promise<void> => {
+      let results;
+      try {
+        results = await deps.send(chunk.map((p) => p.entry));
+      } catch (err) {
+        if (chunk.length > 1) {
+          for (const p of chunk) await publish([p], shard);
+          return;
+        }
+        const [p] = chunk as [Pending];
+        deps.log({ level: 'error', msg: 'outbox shard failed', shard, error: (err as Error).message });
+        summary.failed += 1;
+        await settle(deps, p, 'outbox marker not deferred', () => deps.store.defer(p.key, outboxPendingGsi2(p.tripId, nowIso, p.version).GSI2SK));
+        return;
+      }
+      for (const [j, p] of chunk.entries()) {
+        const result = results[j];
+        if (result === undefined || result.ErrorCode !== undefined) {
+          summary.failed += 1;
+          deps.log({ level: 'error', msg: 'event not published', detailType: p.entry.DetailType, correlationId: p.correlationId, errorCode: result?.ErrorCode ?? 'MISSING_RESULT' });
+          await settle(deps, p, 'outbox marker not deferred', () => deps.store.defer(p.key, outboxPendingGsi2(p.tripId, nowIso, p.version).GSI2SK));
+          continue;
+        }
+        summary.published += 1;
+        await settle(deps, p, 'outbox marker not cleared', () => deps.store.clear(p.key, nowIso));
+      }
+    };
+
     for (let i = 0; i < OUTBOX_SHARDS; i++) {
       const shard = (first + i) % OUTBOX_SHARDS;
       let pending: Pending[];
@@ -54,27 +83,7 @@ export function createReconciler(deps: ReconcilerDeps): () => Promise<ReconcileS
       summary.found += pending.length;
       for (const p of pending) if (oldest === undefined || p.occurredAt < oldest) oldest = p.occurredAt;
 
-      for (const chunk of chunkEntries(pending)) {
-        let results;
-        try {
-          results = await deps.send(chunk.map((p) => p.entry));
-        } catch (err) {
-          deps.log({ level: 'error', msg: 'outbox shard failed', shard, error: (err as Error).message });
-          summary.failed += chunk.length;
-          continue;
-        }
-        for (const [j, p] of chunk.entries()) {
-          const result = results[j];
-          if (result === undefined || result.ErrorCode !== undefined) {
-            summary.failed += 1;
-            deps.log({ level: 'error', msg: 'event not published', detailType: p.entry.DetailType, correlationId: p.correlationId, errorCode: result?.ErrorCode ?? 'MISSING_RESULT' });
-            await settle(deps, p, 'outbox marker not deferred', () => deps.store.defer(p.key, outboxPendingGsi2(p.tripId, nowIso, p.version).GSI2SK));
-            continue;
-          }
-          summary.published += 1;
-          await settle(deps, p, 'outbox marker not cleared', () => deps.store.clear(p.key, nowIso));
-        }
-      }
+      for (const chunk of chunkEntries(pending)) await publish(chunk, shard);
     }
 
     if (oldest !== undefined) summary.oldestAgeSeconds = Math.round((now.getTime() - Date.parse(oldest)) / 1000);
