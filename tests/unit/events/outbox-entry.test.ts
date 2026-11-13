@@ -38,7 +38,8 @@ describe('buildEntry', () => {
   });
 
   it('omits correlationId when the event has none', () => {
-    const { correlationId: _, ...withoutCorrelation } = ITEM;
+    const withoutCorrelation: Record<string, unknown> = { ...ITEM };
+    delete withoutCorrelation.correlationId;
     expect(buildEntry(withoutCorrelation, 'ridecore').correlationId).toBeUndefined();
   });
 });
