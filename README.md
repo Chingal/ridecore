@@ -192,6 +192,28 @@ billing DLQ: 1 message(s). Move it back with: make redrive QUEUE=billing
 
 `make redrive QUEUE=billing` moves the messages back to the queue (after deploying a fix, in real life).
 
+## Watch the outbox reconciler recover a lost event
+
+Every trip event is written to the outbox with a "pending" marker, and the stream publisher clears it once
+EventBridge accepts the event. A scheduled `reconciler` Lambda publishes, every minute, any event still
+pending after 60 s, so a stream record that is dropped or late does not leave a trip without its event
+([ADR 0008](docs/decisions/0008-scaling.md), change 2). `make outbox-demo` switches the stream to the
+publisher off, creates a trip and waits for its `trip.requested` on the bus; the stream is switched back on
+at the end, also after an error or Ctrl-C (if the process is killed hard, `make outbox-demo-restore` switches
+it back on). Run on Floci:
+
+```
+Stream to the publisher: disabled.
+Created trip 14aee805-f95c-4da9-b31d-76b6f734ff36 at 2026-11-13T11:50:58.837Z. Its trip.requested is in the outbox, marked pending.
+The stream is off, so only the reconciler (every minute, events older than 60 s) can publish it.
+  t= 10s  waiting for trip.requested on the bus
+  ...
+  t= 90s  waiting for trip.requested on the bus
+trip.requested published by the reconciler after 92 s.
+Removed the temporary rule and queue.
+Stream to the publisher: enabled.
+```
+
 ## Decisions
 
 - [ADR 0001 — Toolchain spike](docs/decisions/0001-toolchain-spike.md): why the Lambda runs on `nodejs24.x`,
@@ -223,7 +245,12 @@ How this system grows from thousands to millions of users, one measured decision
    ridecore runs exactly as before. Code in
    [ridecore-location](https://github.com/Chingal/ridecore-location); before/after numbers in
    [ADR 0008](docs/decisions/0008-scaling.md#results-change-6-built-2026-11-11).
-2. Next: making trip events recoverable (an outbox reconciler), then batch matching.
+2. **Outbox reconciler**: every trip event is marked pending until it is on the bus, and a scheduled
+   Lambda publishes any event the table stream dropped or delayed, about a minute later. See
+   `make outbox-demo` above and [ADR 0008](docs/decisions/0008-scaling.md#results-change-2-built-2026-11-13).
+   At peak on Floci, billed trips went from 47 % to 99 % (100 % three minutes later).
+3. Next: less stream lag (publisher batch size), since offers still depend on the stream being fast,
+   then batch matching at peak.
 
 ## Status and limitations
 

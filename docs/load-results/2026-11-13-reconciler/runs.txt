@@ -1,0 +1,31 @@
+# k6 summary lines, invariant check, Floci stream trims and reconciler summaries (2026-11-13)
+# make load PROFILE=peak LOCATION=1 at ridecore d7dfcee (branch feat/outbox-reconciler), same laptop and Floci as 2026-11-11.
+
+## with the reconciler
+  http_reqs: 11842
+  http_req_failed: 1.11%
+  http_req_duration: p50 8ms p95 285ms p99 10000ms max 10002ms (n=11842)
+  offer_push_ms: p50 1030ms p95 1522ms p99 1997ms max 5979ms (n=731)
+  time_to_accept_ms: p50 36169ms p95 44392ms p99 48004ms max 48359ms (n=137)
+  trips_completed: 120
+  trips_unaccepted: 267
+  conflicts_409: 739
+    TRIP_ALREADY_TAKEN: 578
+    ACTIVE_TRIP_EXISTS: 132
+    INVALID_TRANSITION: 29
+  app_errors: 131
+  map_messages: 24060
+  ws_refused: 0.00%
+load check: read 411 trips, 100 drivers, 10 queues; 3 violation(s)
+  - trip 5fb68f9e-eeae-4da9-8f27-7f25a10c9b13 is RATED but has no billing record
+  - trip 8e78398d-8453-4807-bafb-df3643bca97b is RATED but has no billing record
+  - trip 6a813b80-5468-4af8-bb22-feebd9217077 is RATED but has no billing record
+load: invariant check failed (exit 1)
+load teardown: 2 trips cancelled, 1 completed, 100 drivers OFFLINE
+  floci stream 'checkpoint ... was trimmed' warnings: 463
+  reconciler runs (found = published, failed 0): 0, 0, 59, 164, 201, 198, 139 -> 761 events; oldestAgeSeconds max 120
+  outbox marker not cleared (publisher): 0
+
+## invariant check re-run after the run
+  12:18:17Z (16 s after the run): 1 violation — trip a016cea7-d16d-4e12-80c9-224f8c8a77bb is COMPLETED but has no billing record (the 3 RATED ones were billed)
+  12:20:54Z (about 3 min after the run): 0 violations

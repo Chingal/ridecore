@@ -59,6 +59,7 @@ describe('outboxEntries', () => {
 
 describe('publisher handler', () => {
   const log = () => undefined;
+  const noStore = { clear: () => Promise.resolve(), now: () => new Date('2026-11-13T12:00:00.000Z') };
 
   function fakeBus(results: (entries: PutEventsRequestEntry[]) => PutEventsResultEntry[]) {
     const calls: PutEventsRequestEntry[][] = [];
@@ -73,7 +74,7 @@ describe('publisher handler', () => {
   it('sends at most 10 entries per PutEvents call', async () => {
     const bus = fakeBus(ok);
     const records = Array.from({ length: 23 }, (_, i) => outbox(String(i + 1), `t${i}`, 1));
-    const res = await createPublisher({ send: bus.send, busName: BUS, log })({ Records: records });
+    const res = await createPublisher({ send: bus.send, busName: BUS, log, ...noStore })({ Records: records });
     expect(bus.calls.map((c) => c.length)).toEqual([10, 10, 3]);
     expect(res).toEqual({ batchItemFailures: [] });
   });
@@ -81,7 +82,7 @@ describe('publisher handler', () => {
   it('reports the first rejected record so the stream retries from it', async () => {
     const bus = fakeBus((entries) => entries.map((_, i) => (i === 1 ? { ErrorCode: 'InternalFailure', ErrorMessage: 'x' } : { EventId: 'e' })));
     const records = [outbox('11', 'a', 1), outbox('12', 'b', 1), outbox('13', 'c', 1)];
-    const res = await createPublisher({ send: bus.send, busName: BUS, log })({ Records: records });
+    const res = await createPublisher({ send: bus.send, busName: BUS, log, ...noStore })({ Records: records });
     expect(res).toEqual({ batchItemFailures: [{ itemIdentifier: '12' }] });
   });
 
@@ -89,7 +90,7 @@ describe('publisher handler', () => {
     let n = 0;
     const bus = fakeBus((entries) => (n++ === 0 ? entries.map(() => ({ ErrorCode: 'Throttling' })) : ok(entries)));
     const records = Array.from({ length: 12 }, (_, i) => outbox(String(100 + i), `t${i}`, 1));
-    const res = await createPublisher({ send: bus.send, busName: BUS, log })({ Records: records });
+    const res = await createPublisher({ send: bus.send, busName: BUS, log, ...noStore })({ Records: records });
     expect(bus.calls).toHaveLength(1);
     expect(res).toEqual({ batchItemFailures: [{ itemIdentifier: '100' }] });
   });
@@ -97,14 +98,14 @@ describe('publisher handler', () => {
   it('never puts two events of the same trip in one PutEvents call, so a retry keeps per-trip order', async () => {
     const bus = fakeBus(ok);
     const records = [outbox('1', 'a', 1), outbox('2', 'b', 1), outbox('3', 'a', 2), outbox('4', 'a', 3), outbox('5', 'c', 1)];
-    await createPublisher({ send: bus.send, busName: BUS, log })({ Records: records });
+    await createPublisher({ send: bus.send, busName: BUS, log, ...noStore })({ Records: records });
     const tripsPerCall = bus.calls.map((c) => c.map((e) => (JSON.parse(String(e.Detail)) as { tripId: string }).tripId));
     expect(tripsPerCall).toEqual([['a', 'b'], ['a'], ['a', 'c']]);
   });
 
   it('a failed event of a trip is retried before any later event of the same trip is sent', async () => {
     const bus = fakeBus((entries) => entries.map((e) => (String(e.Detail).includes('"a:1"') ? { ErrorCode: 'InternalFailure' } : { EventId: 'e' })));
-    const res = await createPublisher({ send: bus.send, busName: BUS, log })({ Records: [outbox('1', 'a', 1), outbox('2', 'a', 2)] });
+    const res = await createPublisher({ send: bus.send, busName: BUS, log, ...noStore })({ Records: [outbox('1', 'a', 1), outbox('2', 'a', 2)] });
     expect(bus.calls.flat().map((e) => (JSON.parse(String(e.Detail)) as { eventId: string }).eventId)).toEqual(['a:1']);
     expect(res).toEqual({ batchItemFailures: [{ itemIdentifier: '1' }] });
   });
@@ -112,20 +113,93 @@ describe('publisher handler', () => {
   it('an INSERT without a new image is a configuration error, not a skip', async () => {
     const bus = fakeBus(ok);
     const broken: DynamoDBRecord = { eventName: 'INSERT', dynamodb: { SequenceNumber: '7' } };
-    await expect(createPublisher({ send: bus.send, busName: BUS, log })({ Records: [broken] })).rejects.toThrow(/NewImage/);
+    await expect(createPublisher({ send: bus.send, busName: BUS, log, ...noStore })({ Records: [broken] })).rejects.toThrow(/NewImage/);
   });
 
   it('rethrows when PutEvents itself fails (the whole batch is retried)', async () => {
     const send = () => Promise.reject(new Error('network down'));
-    await expect(createPublisher({ send, busName: BUS, log })({ Records: [outbox('1', 't', 1)] })).rejects.toThrow('network down');
+    await expect(createPublisher({ send, busName: BUS, log, ...noStore })({ Records: [outbox('1', 't', 1)] })).rejects.toThrow('network down');
   });
 
   it('a batch with no outbox records publishes nothing', async () => {
     const bus = fakeBus(ok);
-    const res = await createPublisher({ send: bus.send, busName: BUS, log })({
+    const res = await createPublisher({ send: bus.send, busName: BUS, log, ...noStore })({
       Records: [record('1', 'MODIFY', { PK: 'TRIP#t', SK: 'META', entity: 'TRIP' })],
     });
     expect(bus.calls).toHaveLength(0);
     expect(res).toEqual({ batchItemFailures: [] });
   });
 });
+
+describe('publisher clears the outbox marker', () => {
+  const NOW = new Date('2026-11-13T12:00:00.000Z');
+  const ok = (entries: PutEventsRequestEntry[]): PutEventsResultEntry[] => entries.map(() => ({ EventId: 'e' }));
+
+  it('clears the marker of each accepted entry, after PutEvents', async () => {
+    const order: string[] = [];
+    const cleared: unknown[] = [];
+    const send = (entries: PutEventsRequestEntry[]) => {
+      order.push('send');
+      return Promise.resolve(ok(entries));
+    };
+    const clear = (key: unknown, at: string) => {
+      order.push('clear');
+      cleared.push([key, at]);
+      return Promise.resolve();
+    };
+    const res = await createPublisher({ send, busName: BUS, log: () => undefined, clear, now: () => NOW })({
+      Records: [outbox('1', 'a', 1), outbox('2', 'b', 1)],
+    });
+    expect(res).toEqual({ batchItemFailures: [] });
+    expect(order).toEqual(['send', 'clear', 'clear']);
+    expect(cleared).toEqual([
+      [{ PK: 'TRIP#a', SK: 'EVENT#000001' }, NOW.toISOString()],
+      [{ PK: 'TRIP#b', SK: 'EVENT#000001' }, NOW.toISOString()],
+    ]);
+  });
+
+  it('does not clear a rejected entry or anything after it', async () => {
+    const cleared: unknown[] = [];
+    const send = (entries: PutEventsRequestEntry[]) =>
+      Promise.resolve(entries.map((_, i) => (i === 1 ? { ErrorCode: 'InternalFailure' } : { EventId: 'e' })));
+    const clear = (key: unknown) => {
+      cleared.push(key);
+      return Promise.resolve();
+    };
+    const res = await createPublisher({ send, busName: BUS, log: () => undefined, clear, now: () => NOW })({
+      Records: [outbox('11', 'a', 1), outbox('12', 'b', 1), outbox('13', 'c', 1)],
+    });
+    expect(res).toEqual({ batchItemFailures: [{ itemIdentifier: '12' }] });
+    expect(cleared).toEqual([{ PK: 'TRIP#a', SK: 'EVENT#000001' }]);
+  });
+
+  it('a failed clear is logged and the batch still succeeds', async () => {
+    const logs: Record<string, unknown>[] = [];
+    const send = (entries: PutEventsRequestEntry[]) => Promise.resolve(ok(entries));
+    const clear = () => Promise.reject(new Error('throttled'));
+    const res = await createPublisher({ send, busName: BUS, log: (l) => logs.push(l), clear, now: () => NOW })({
+      Records: [outbox('1', 'a', 1, { correlationId: 'c-9' })],
+    });
+    expect(res).toEqual({ batchItemFailures: [] });
+    expect(logs.filter((l) => l.msg === 'outbox marker not cleared')).toEqual([
+      expect.objectContaining({ level: 'warn', msg: 'outbox marker not cleared', correlationId: 'c-9' }),
+    ]);
+  });
+
+  it('clears the accepted entries of a chunk concurrently, so a slow clear does not stretch the batch', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const send = (entries: PutEventsRequestEntry[]) => Promise.resolve(ok(entries));
+    const clear = async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight -= 1;
+    };
+    await createPublisher({ send, busName: BUS, log: () => undefined, clear, now: () => NOW })({
+      Records: [outbox('1', 'a', 1), outbox('2', 'b', 1), outbox('3', 'c', 1)],
+    });
+    expect(maxInFlight).toBe(3);
+  });
+});
+

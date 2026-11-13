@@ -1,0 +1,4 @@
+# node scripts/load/ratios.ts <from> <to> 200, run right after the run (2026-11-13).
+# Same laptop and Floci as 2026-11-11; Go path (ridecore-location). Profile peak: 100 drivers, 200 passengers.
+# with the reconciler
+{"from":"2026-11-13T12:11:25","to":"2026-11-13T12:18:01","trips":411,"offered":171,"finished":122,"billed":121}
