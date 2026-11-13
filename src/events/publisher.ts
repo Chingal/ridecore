@@ -4,7 +4,9 @@ import { unmarshall } from '@aws-sdk/util-dynamodb';
 import type { DynamoDBBatchResponse, DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { jsonLog, type Logger } from '../log.ts';
 import { EVENT_BUS_NAME } from './names.ts';
-import { buildEntry, type BuiltEntry } from './outbox-entry.ts';
+import { buildEntry, type BuiltEntry, type OutboxKey } from './outbox-entry.ts';
+import { createDocumentClient, createDynamoClient } from '../infra/dynamo/client.ts';
+import { createOutboxStore } from '../infra/dynamo/outbox-store.ts';
 
 export { EVENT_SOURCE } from './names.ts';
 
@@ -38,6 +40,9 @@ export type PublisherDeps = {
   send: (entries: PutEventsRequestEntry[]) => Promise<PutEventsResultEntry[]>;
   busName: string;
   log: Logger;
+  /** Removes the outbox item's pending marker (ADR 0008, change 2); see `OutboxStore.clear`. */
+  clear: (key: OutboxKey, publishedAt: string) => Promise<void>;
+  now: () => Date;
 };
 
 /**
@@ -66,6 +71,7 @@ export function chunkEntries<T extends { tripId: string }>(entries: T[]): T[][] 
  * Stream handler: publishes outbox events in calls built by `chunkEntries`, in order. On the first rejected entry it
  * stops and reports that record, so the stream retries from it (later records are re-sent too;
  * consumers tolerate duplicates). A failed PutEvents call rethrows and the whole batch is retried.
+ * After an entry is accepted its pending marker is cleared; a failed clear is only logged.
  */
 export function createPublisher(deps: PublisherDeps): (event: DynamoDBStreamEvent) => Promise<DynamoDBBatchResponse> {
   return async (event) => {
@@ -84,10 +90,29 @@ export function createPublisher(deps: PublisherDeps): (event: DynamoDBStreamEven
           return { batchItemFailures: [{ itemIdentifier: item.sequenceNumber }] };
         }
         deps.log({ level: 'info', msg: 'event published', detailType: item.entry.DetailType, correlationId: item.correlationId });
+        await clearMarker(deps, item);
       }
     }
     return { batchItemFailures: [] };
   };
+}
+
+/**
+ * Clears the pending marker of a published event. A failure only means the reconciler publishes the
+ * event again later (a duplicate the consumers absorb), so it is logged and never fails the batch.
+ */
+async function clearMarker(deps: PublisherDeps, item: OutboxEntry): Promise<void> {
+  try {
+    await deps.clear(item.key, deps.now().toISOString());
+  } catch (err) {
+    deps.log({ level: 'warn', msg: 'outbox marker not cleared', correlationId: item.correlationId, error: (err as Error).message });
+  }
+}
+
+function requiredTable(): string {
+  const table = process.env.RIDECORE_TABLE;
+  if (!table) throw new Error('RIDECORE_TABLE is not set');
+  return table;
 }
 
 let lambda: ((event: DynamoDBStreamEvent) => Promise<DynamoDBBatchResponse>) | undefined;
@@ -100,6 +125,8 @@ export const handler = (event: DynamoDBStreamEvent): Promise<DynamoDBBatchRespon
       send: async (entries) => (await client.send(new PutEventsCommand({ Entries: entries }))).Entries ?? [],
       busName: process.env.RIDECORE_EVENT_BUS ?? EVENT_BUS_NAME,
       log: jsonLog,
+      clear: createOutboxStore(createDocumentClient(createDynamoClient()), requiredTable()).clear,
+      now: () => new Date(),
     });
   }
   return lambda(event);
