@@ -21,28 +21,50 @@ import { signToken } from '../src/http/auth.ts';
  */
 
 /**
- * Runs `fn` with the stream disabled and enables it again afterwards. On SIGINT it aborts `fn`, waits
- * for it to settle (so `fn` removes what it created), enables the stream, then rejects with
- * "interrupted" so the caller can exit 130.
+ * Runs `fn` with the stream disabled and always enables it again, retrying the enable while the mapping
+ * is still changing. The disable is inside the guard too, so a disable that half-happened is undone.
+ * SIGINT aborts `fn` and waits for it to settle (so `fn` removes what it created); the handler stays
+ * registered until the stream is enabled again, so a second Ctrl-C cannot kill the process before
+ * that. It then rejects with "interrupted" so the caller can exit 130.
  */
 export async function withStreamDisabled<T>(
   toggle: (enabled: boolean) => Promise<void>,
   fn: (signal: AbortSignal) => Promise<T>,
-  signals: Pick<NodeJS.EventEmitter, 'once' | 'off'> = process,
+  signals: Pick<NodeJS.EventEmitter, 'on' | 'off'> = process,
+  retryDelayMs = 2000,
 ): Promise<T> {
   const abort = new AbortController();
-  const onSigint = () => abort.abort();
-  signals.once('SIGINT', onSigint);
-  await toggle(false);
+  const onSigint = () => {
+    if (abort.signal.aborted) console.error('Cleaning up and switching the stream back on, please wait...');
+    abort.abort();
+  };
+  signals.on('SIGINT', onSigint);
   try {
+    await toggle(false);
+    if (abort.signal.aborted) throw new Error('interrupted');
     const result = await fn(abort.signal).catch((err: unknown) => {
       throw abort.signal.aborted ? new Error('interrupted') : err;
     });
     if (abort.signal.aborted) throw new Error('interrupted');
     return result;
   } finally {
+    await enableWithRetry(toggle, retryDelayMs);
     signals.off('SIGINT', onSigint);
-    await toggle(true);
+  }
+}
+
+async function enableWithRetry(toggle: (enabled: boolean) => Promise<void>, delayMs: number): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await toggle(true);
+      return;
+    } catch (err) {
+      if (attempt >= 5) {
+        console.error(`Could not switch the stream back on: ${(err as Error).message}. Run 'make outbox-demo-restore'.`);
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
   }
 }
 
@@ -87,6 +109,11 @@ async function main(): Promise<void> {
   };
 
   const name = `outbox-demo-${randomUUID().slice(0, 8)}`;
+  if (process.argv.includes('--restore')) {
+    await toggle(true);
+    return;
+  }
+
   await withStreamDisabled(toggle, async (signal) => {
     let queueUrl: string | undefined;
     let ruleCreated = false;

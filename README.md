@@ -199,7 +199,8 @@ EventBridge accepts the event. A scheduled `reconciler` Lambda publishes, every 
 pending after 60 s, so a stream record that is dropped or late does not leave a trip without its event
 ([ADR 0008](docs/decisions/0008-scaling.md), change 2). `make outbox-demo` switches the stream to the
 publisher off, creates a trip and waits for its `trip.requested` on the bus; the stream is switched back on
-at the end, also after an error or Ctrl-C. Run on Floci:
+at the end, also after an error or Ctrl-C (if the process is killed hard, `make outbox-demo-restore` switches
+it back on). Run on Floci:
 
 ```
 Stream to the publisher: disabled.
