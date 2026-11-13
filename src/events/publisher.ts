@@ -3,17 +3,15 @@ import type { AttributeValue } from '@aws-sdk/client-dynamodb';
 import { unmarshall } from '@aws-sdk/util-dynamodb';
 import type { DynamoDBBatchResponse, DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { jsonLog, type Logger } from '../log.ts';
-import { EVENT_BUS_NAME, EVENT_SOURCE } from './names.ts';
+import { EVENT_BUS_NAME } from './names.ts';
+import { buildEntry, type BuiltEntry } from './outbox-entry.ts';
 
 export { EVENT_SOURCE } from './names.ts';
 
 /** PutEvents accepts at most 10 entries per call. */
 const PUT_EVENTS_MAX = 10;
 
-/** Storage attributes of an outbox item that are not part of the event. */
-const STORAGE_ATTRIBUTES = new Set(['PK', 'SK', 'entity']);
-
-export type OutboxEntry = { sequenceNumber: string; tripId: string; correlationId?: string; entry: PutEventsRequestEntry };
+export type OutboxEntry = BuiltEntry & { sequenceNumber: string };
 
 /**
  * The outbox events among stream records (INSERTs of `entity: 'EVENT'` items), in stream order, as
@@ -31,13 +29,7 @@ export function outboxEntries(records: DynamoDBRecord[], busName: string): Outbo
     if (image === undefined || sequenceNumber === undefined) throw new Error('Stream INSERT record without NewImage or SequenceNumber');
     const item = unmarshall(image as Record<string, AttributeValue>);
     if (item.entity !== 'EVENT') continue;
-    const event = Object.fromEntries(Object.entries(item).filter(([key]) => !STORAGE_ATTRIBUTES.has(key)));
-    entries.push({
-      sequenceNumber,
-      tripId: String(event.tripId),
-      ...(typeof event.correlationId === 'string' ? { correlationId: event.correlationId } : {}),
-      entry: { Source: EVENT_SOURCE, DetailType: String(event.type), EventBusName: busName, Detail: JSON.stringify(event) },
-    });
+    entries.push({ sequenceNumber, ...buildEntry(item, busName) });
   }
   return entries;
 }
@@ -53,9 +45,9 @@ export type PublisherDeps = {
  * same trip in one call: EventBridge may accept later entries of a call after rejecting an earlier
  * one, so this keeps a trip's events from overtaking each other when a call partly fails.
  */
-export function chunkEntries(entries: OutboxEntry[]): OutboxEntry[][] {
-  const chunks: OutboxEntry[][] = [];
-  let current: OutboxEntry[] = [];
+export function chunkEntries<T extends { tripId: string }>(entries: T[]): T[][] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
   let trips = new Set<string>();
   for (const entry of entries) {
     if (current.length === PUT_EVENTS_MAX || trips.has(entry.tripId)) {
