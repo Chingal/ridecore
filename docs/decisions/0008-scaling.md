@@ -90,3 +90,57 @@ Raw numbers: `docs/load-results/2026-11-11-location/`.
 - The runs were made at ridecore `3c538c8` and ridecore-location `ded4c95`. The fixes that came after
   them (a Codex review: one switch, the checker reading the location queue, how trip events are
   retried) do not change the measured paths.
+
+## Results: change 2 built (2026-11-13)
+
+Change 2 is the outbox reconciler. Design: `docs/design/2026-11-12-outbox-reconciler-design.md`.
+
+**What was built**
+- Every outbox item is written with a sparse "pending" marker on GSI2 (`OUTBOX#<shard>`, 10 shards by a
+  hash of the trip id, sorted by `occurredAt`), in the same transaction as the trip.
+- The stream publisher clears the marker after EventBridge accepts the event and stamps `publishedAt`. A
+  failed clear is logged and never fails the batch.
+- A `reconciler` Lambda runs every minute. It reads each shard for events pending more than 60 s, at most
+  50 per shard (500 per run), starting at a different shard every minute. It publishes them with the
+  publisher's chunking rules, clears the accepted ones, and moves a rejected one to the back of its shard,
+  so a stuck event never fills its shard's budget. A shard that fails is logged and the run moves on.
+- One entry builder serves both paths. A golden test pins the event body to what the publisher sent
+  before this change.
+
+**What was measured (Floci, laptop)**
+- The schedule fires the Lambda directly on Floci: with the publisher's stream mapping disabled, an
+  event written 5 minutes earlier was published and cleared 45 s after it was written.
+- `make outbox-demo` (stream to the publisher off, then a new trip): `trip.requested` reached the bus
+  through the reconciler after 92 s. The expected window is 60 to about 130 s.
+- The peak load rerun was not run (optional, by the owner's decision on 2026-11-13). The
+  offered/billed percentages above are still the latest measured.
+
+**Consumers and late or duplicate events.** The reconciler may publish an event twice, or after later
+events of the same trip. Each consumer was checked:
+
+| Consumer | Duplicate | Late |
+|---|---|---|
+| dispatch (`trip.requested`) | republishes the recorded offers; driver-offers dedups by `offerId` | no offers once the trip left `REQUESTED` (`src/app/dispatch.ts:122`) |
+| billing (`trip.completed`) | one record per trip (`duplicate billing event`) | nothing comes after `trip.completed` |
+| driver-offers (offers) | acked by `offerId` | dispatch emits no offer for a trip that left `REQUESTED` |
+| notifier (every `trip.*`) | pushed again; clients keep the newest `version` | same: clients drop anything not newer |
+| ridecore-location (accepted, completed, cancelled) | a version already applied is ignored | same (`internal/store/store.go:149`) |
+
+No consumer needed a fix.
+
+**Trade-offs and limits**
+- Cost: one extra write per event (the clear), which also puts a `MODIFY` record on the table stream.
+  The stream filter passes only `INSERT`s of events, so the publisher is not invoked for it.
+- Duplicates: when the stream is slower than 60 s (on AWS, `IteratorAge` above a minute), the event is
+  published by both paths. Accepted, because every consumer above absorbs it.
+- A sparse pending index instead of scanning for a missing `publishedAt`: the sweep reads only what is
+  still pending, and its cost does not grow with the size of the table.
+- Scope: only events written after this deploys carry the marker. Events lost before it are not
+  recovered.
+- "About two minutes" is an objective, not a guarantee. The cap per run, retries, the eventual
+  consistency of the index and schedule delays can stretch it. `oldestAgeSeconds` in the reconciler's
+  log is the number to watch.
+- Shards: 10 hash buckets spread the writes, but they are not 10 physical partitions. Changing
+  `OUTBOX_SHARDS` needs a period that reads both the old and the new range, or markers are stranded. The
+  pending index shares GSI2 with driver availability and map watches, so heavy throttling on GSI2 would
+  push back on trip writes.
