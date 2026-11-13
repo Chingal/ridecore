@@ -244,7 +244,10 @@ How this system grows from thousands to millions of users, one measured decision
    ridecore runs exactly as before. Code in
    [ridecore-location](https://github.com/Chingal/ridecore-location); before/after numbers in
    [ADR 0008](docs/decisions/0008-scaling.md#results-change-6-built-2026-11-11).
-2. Next: making trip events recoverable (an outbox reconciler), then batch matching.
+2. **Outbox reconciler**: every trip event is marked pending until it is on the bus, and a scheduled
+   Lambda publishes any event the table stream dropped or delayed, about a minute later. See
+   `make outbox-demo` above and [ADR 0008](docs/decisions/0008-scaling.md#results-change-2-built-2026-11-13).
+3. Next: batch matching at peak, and the peak load rerun with the reconciler in place.
 
 ## Status and limitations
 
