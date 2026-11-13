@@ -6,6 +6,7 @@ import { DomainError } from '../../src/domain/errors.ts';
 import { toEvent } from '../../src/domain/events.ts';
 import { type Actor, type Trip, transition, type TripAction } from '../../src/domain/trip.ts';
 import { createDocumentClient, createDynamoClient } from '../../src/infra/dynamo/client.ts';
+import { GSI2, outboxPendingGsi2, outboxPendingPk, outboxShard } from '../../src/infra/dynamo/keys.ts';
 import { TripRepo } from '../../src/infra/dynamo/trip-repo.ts';
 import { createTestTable, deleteTestTable, useFlociEnv } from './helpers/table.ts';
 
@@ -86,6 +87,29 @@ describe('TripRepo (DynamoDB on Floci)', () => {
       eventId: `${trip.id}:1`,
     });
     expect(await repo.activeTripId('PASSENGER', trip.passengerId)).toBe(trip.id);
+  });
+
+  it('a new outbox event is in the pending index', async () => {
+    const trip = await createTrip();
+    const outbox = await rawItem(`TRIP#${trip.id}`, 'EVENT#000001');
+    // GSI reads are eventually consistent on AWS: poll briefly.
+    let found: Record<string, unknown>[] = [];
+    for (let i = 0; i < 25 && found.length === 0; i++) {
+      const res = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: GSI2.indexName,
+          KeyConditionExpression: '#pk = :pk',
+          ExpressionAttributeNames: { '#pk': GSI2.partitionKey },
+          ExpressionAttributeValues: { ':pk': outboxPendingPk(outboxShard(trip.id)) },
+        }),
+      );
+      found = (res.Items ?? []).filter((item) => item.tripId === trip.id);
+      if (found.length === 0) await new Promise((r) => setTimeout(r, 200));
+    }
+    expect(found.map((item) => item.SK)).toEqual(['EVENT#000001']);
+    expect(found[0]?.GSI2SK).toBe(outboxPendingGsi2(trip.id, String(outbox?.occurredAt), 1).GSI2SK);
+    expect(await repo.get(trip.id)).not.toHaveProperty('GSI2PK');
   });
 
   it('the outbox event carries the correlation id of the run that wrote it', async () => {

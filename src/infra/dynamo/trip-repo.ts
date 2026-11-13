@@ -9,6 +9,7 @@ import {
   OFFERED_DRIVER_IDS,
   offerSeqGuard,
   outboxKey,
+  outboxPendingGsi2,
   passengerGsi1Pk,
   type ReservationKind,
   reservationKey,
@@ -219,7 +220,13 @@ export class TripRepo {
     return {
       Put: {
         TableName: this.tableName,
-        Item: { ...withoutCorrelation(event), ...correlation(), ...outboxKey(event.tripId, event.version), entity: 'EVENT' },
+        Item: {
+          ...withoutCorrelation(event),
+          ...correlation(),
+          ...outboxKey(event.tripId, event.version),
+          ...outboxPendingGsi2(event.tripId, event.occurredAt, event.version),
+          entity: 'EVENT',
+        },
         ConditionExpression: 'attribute_not_exists(PK)',
       },
     };

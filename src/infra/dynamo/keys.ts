@@ -75,6 +75,30 @@ export const outboxKey = (tripId: string, version: number) => ({
   SK: `EVENT#${String(version).padStart(6, '0')}`,
 });
 
+/** Number of `OUTBOX#<n>` partitions of the pending index; changing it needs a period reading both ranges (ADR 0008). */
+export const OUTBOX_SHARDS = 10;
+
+/** Stable shard of a trip in the pending index: FNV-1a (32-bit) over the UTF-8 bytes of the id. */
+export function outboxShard(tripId: string): number {
+  let hash = 0x811c9dc5;
+  for (const byte of new TextEncoder().encode(tripId)) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash % OUTBOX_SHARDS;
+}
+
+export const outboxPendingPk = (shard: number) => `OUTBOX#${shard}`;
+
+/**
+ * Sparse GSI2 keys of an outbox event that is not on the bus yet (ADR 0008, change 2). Written with
+ * the event; the publisher or the reconciler removes them once EventBridge accepts it.
+ */
+export const outboxPendingGsi2 = (tripId: string, occurredAt: string, version: number) => ({
+  GSI2PK: outboxPendingPk(outboxShard(tripId)),
+  GSI2SK: `${occurredAt}#${tripId}#${String(version).padStart(6, '0')}`,
+});
+
 export const GSI2 = TABLE_DEFINITION.globalSecondaryIndexes[1];
 
 export const driverKey = (driverId: string) => ({ PK: `DRIVER#${driverId}`, SK: 'META' });
