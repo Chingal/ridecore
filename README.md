@@ -248,7 +248,9 @@ How this system grows from thousands to millions of users, one measured decision
 2. **Outbox reconciler**: every trip event is marked pending until it is on the bus, and a scheduled
    Lambda publishes any event the table stream dropped or delayed, about a minute later. See
    `make outbox-demo` above and [ADR 0008](docs/decisions/0008-scaling.md#results-change-2-built-2026-11-13).
-3. Next: batch matching at peak, and the peak load rerun with the reconciler in place.
+   At peak on Floci, billed trips went from 47 % to 99 % (100 % three minutes later).
+3. Next: less stream lag (publisher batch size), since offers still depend on the stream being fast,
+   then batch matching at peak.
 
 ## Status and limitations
 

@@ -112,8 +112,30 @@ Change 2 is the outbox reconciler. Design: `docs/design/2026-11-12-outbox-reconc
   event written 5 minutes earlier was published and cleared 45 s after it was written.
 - `make outbox-demo` (stream to the publisher off, then a new trip): `trip.requested` reached the bus
   through the reconciler after 92 s. The expected window is 60 to about 130 s.
-- The peak load rerun was not run (optional, by the owner's decision on 2026-11-13). The
-  offered/billed percentages above are still the latest measured.
+- Peak load rerun, Go path, same laptop and Floci as 2026-11-11 (raw numbers:
+  `docs/load-results/2026-11-13-reconciler/`):
+
+| `peak`, Go path | 2026-11-11 (no reconciler) | 2026-11-13 (reconciler) |
+|---|---|---|
+| Trips created | 416 | 411 |
+| Got an offer | 177 (43 %) | 171 (42 %) |
+| Finished | 130 | 122 |
+| Finished with a billing record | 61 (47 %) | **121 (99 %)** |
+| Invariant violations at the end of the run | 73 | 3 (all "billed late") |
+| Violations about 3 minutes later | (still unbilled) | **0** |
+| Floci "checkpoint was trimmed" warnings | 457 | 463 |
+| HTTP requests failed | 1.88 % | 1.11 % |
+| Events published by the reconciler | - | 761, none failed |
+| Oldest pending event seen | - | 120 s |
+
+  **What it shows:** Floci trims the stream as much as before, but no event is lost any more. The
+  reconciler published 761 events the stream dropped or delayed, and none waited more than 120 s.
+  Billing went from 47 % to 99 % at the end of the run and to 100 % three minutes later.
+
+  **What it does not fix:** offers stayed at 42 %. A recovered `trip.requested` arrives up to two
+  minutes late, after many load passengers have given up, and 100 drivers serve more than 400 trips.
+  Recovering an event is enough for billing, which can wait. It is not enough for an offer, which
+  cannot. That makes change 1 (publisher batch size: less stream lag) the next step for offers.
 
 **Consumers and late or duplicate events.** The reconciler may publish an event twice, or after later
 events of the same trip. Each consumer was checked:
