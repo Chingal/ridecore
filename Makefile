@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo redrive demo-map mcp-token coverage demo load load-teardown
+.PHONY: up down deploy deploy-stateful deploy-api build package seed dev e2e e2e-local test lint dlq-demo outbox-demo redrive demo-map mcp-token coverage demo load load-teardown
 
 # Floci (local AWS) endpoint and dummy credentials, pinned on every CDK/osls call so a deploy from
 # this Makefile can only ever reach Floci, whatever AWS settings the shell exports.
@@ -105,6 +105,12 @@ lint:
 dlq-demo:
 	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
 	@$(LOAD_ENV) && node scripts/dlq-demo.ts
+
+# Switch the stream to the publisher off, create a trip and watch the reconciler publish its
+# trip.requested about a minute later (ADR 0008, change 2). The stream is switched back on at the end.
+outbox-demo:
+	@test -f .env.deploy || { echo "Run 'make up' first (.env.deploy is missing)" >&2; exit 1; }
+	@$(LOAD_ENV) && node scripts/outbox-demo.ts
 
 # Move a DLQ's messages back to its queue: make redrive QUEUE=billing (or dispatch, driver-offers, notifications).
 redrive:
