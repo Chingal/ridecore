@@ -84,7 +84,7 @@ export class TripRepo {
       ),
       tag(this.putReservation('PASSENGER', trip.passengerId, trip.id), CONFLICTS.activeTrip),
       tag(this.putOutbox(event), CONFLICTS.other),
-      ...extraItems.map(tagExtra),
+      ...extraItems.map((e, i) => tagExtra(e, i)),
     ]);
   }
 
@@ -106,7 +106,7 @@ export class TripRepo {
     extraItems: ExtraItem[] = [],
     guard?: SaveGuard,
   ): Promise<void> {
-    await transact(this.doc, [...this.saveItems(before, after, event, guard), ...extraItems.map(tagExtra)]);
+    await transact(this.doc, [...this.saveItems(before, after, event, guard), ...extraItems.map((e, i) => tagExtra(e, i))]);
   }
 
   /** The trip plus its offer bookkeeping, from ONE consistent read. */

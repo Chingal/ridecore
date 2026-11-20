@@ -455,7 +455,7 @@ export class DriverRepo {
         }
         continue;
       }
-      const items: TaggedItem[] = [tag({ Update: update }, CONCURRENT_UPDATE), ...resultItems(commit, written).map(tagExtra)];
+      const items: TaggedItem[] = [tag({ Update: update }, CONCURRENT_UPDATE), ...resultItems(commit, written).map((e, i) => tagExtra(e, i))];
       try {
         await transact(this.doc, items);
         return written;
