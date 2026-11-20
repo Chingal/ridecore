@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { LatLng, Trip } from '../domain/trip.ts';
+import { trimTrailingSlashes } from '../url.ts';
 
 /** A trip as the HTTP API returns it. */
 export type ApiTrip = Trip;
@@ -37,7 +38,7 @@ export type ApiClientOptions = {
 };
 
 export function createApiClient(opts: ApiClientOptions): ApiClient {
-  const baseUrl = opts.baseUrl.replace(/\/+$/, '');
+  const baseUrl = trimTrailingSlashes(opts.baseUrl);
   const doFetch = opts.fetch ?? fetch;
   const timeoutMs = opts.timeoutMs ?? API_TIMEOUT_MS;
   const newKey = opts.newKey ?? randomUUID;

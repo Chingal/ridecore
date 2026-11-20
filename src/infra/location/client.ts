@@ -1,6 +1,7 @@
 import type { NearbySource } from '../../app/dispatch.ts';
 import type { LatLng } from '../../domain/trip.ts';
 import type { Availability } from '../dynamo/driver-repo.ts';
+import { trimTrailingSlashes } from '../../url.ts';
 
 /**
  * How many nearby drivers dispatch asks ridecore-location for. It knows positions, not availability,
@@ -36,7 +37,7 @@ const unavailable = (why: string) => new LocationUnavailableError(why);
  * LocationUnavailableError.
  */
 export function createLocationClient(opts: { url: string; key: string; fetch?: typeof fetch; timeoutMs?: number }): LocationClient {
-  const base = opts.url.replace(/\/+$/, '');
+  const base = trimTrailingSlashes(opts.url);
   const doFetch = opts.fetch ?? fetch;
   const timeoutMs = opts.timeoutMs ?? LOCATION_TIMEOUT_MS;
   return {
