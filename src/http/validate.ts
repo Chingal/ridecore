@@ -32,6 +32,8 @@ export type CancelInput = { reason?: string };
 export type RatingInput = { score: number; comment?: string };
 export type AvailabilityInput = { status: 'AVAILABLE' | 'OFFLINE' };
 
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
 const validationError = (message: string) => new DomainError('VALIDATION_ERROR', 400, message);
 
 /** Parses with `schema`; any issue becomes 400 VALIDATION_ERROR naming the field path (`origin.lat: ...`). */
@@ -48,8 +50,9 @@ function parse<S extends z.ZodType>(schema: S, body: unknown): z.output<S> {
 /** The JSON body, or `undefined` when there is none. A non-empty body that is not JSON is 400 INVALID_JSON. */
 export function parseJsonBody(raw: string | undefined, isBase64Encoded: boolean): unknown {
   if (raw === undefined || raw === '') return undefined;
-  const text = isBase64Encoded ? Buffer.from(raw, 'base64').toString('utf8') : raw;
   try {
+    // `fatal`: invalid UTF-8 is rejected instead of silently becoming U+FFFD.
+    const text = isBase64Encoded ? utf8.decode(Buffer.from(raw, 'base64')) : raw;
     return JSON.parse(text) as unknown;
   } catch {
     throw new DomainError('INVALID_JSON', 400, 'Request body must be valid JSON');

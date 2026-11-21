@@ -37,6 +37,11 @@ describe('parseJsonBody', () => {
     const raw = Buffer.from(JSON.stringify({ a: 1 })).toString('base64');
     expect(parseJsonBody(raw, true)).toEqual({ a: 1 });
   });
+
+  it('rejects JSON with invalid UTF-8 bytes', () => {
+    const raw = Buffer.concat([Buffer.from('{"reason":"'), Buffer.from([0xff]), Buffer.from('"}')]).toString('base64');
+    expect(domainError(() => parseJsonBody(raw, true))).toMatchObject({ code: 'INVALID_JSON', status: 400 });
+  });
 });
 
 describe('parseRequestTrip', () => {
