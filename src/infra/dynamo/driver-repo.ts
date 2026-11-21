@@ -180,16 +180,20 @@ export class DriverRepo {
   /**
    * AVAILABLE drivers in the geohash-5 cell of `p` and its 8 neighbours, nearest first, at most `limit`.
    * GSI2 is eventually consistent on AWS, so a driver who just changed may be missing or stale for a moment.
+   * Each driver appears at most once (its nearest copy): near the poles a neighbour is the centre cell
+   * again, and a driver moving between cells can be read from two of them.
    */
   async availableNear(p: LatLng, limit: number): Promise<Driver[]> {
     const center = cellOf(validateLatLng(p));
-    const cells = [center, ...ngeohash.neighbors(center)];
+    const cells = [...new Set([center, ...ngeohash.neighbors(center)])];
     const pages = await Promise.all(cells.map((cell) => this.queryCell(cell)));
+    const seen = new Set<string>();
     return pages
       .flat()
       .filter((d): d is Driver & { position: LatLng } => d.availability === 'AVAILABLE' && d.position !== undefined)
       .map((d) => ({ driver: d, km: haversineKm(p, d.position) }))
       .sort((a, b) => a.km - b.km || a.driver.id.localeCompare(b.driver.id))
+      .filter(({ driver }) => !seen.has(driver.id) && seen.add(driver.id))
       .slice(0, limit)
       .map(({ driver }) => driver);
   }
