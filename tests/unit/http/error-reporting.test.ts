@@ -77,6 +77,17 @@ describe('error reporting from the HTTP handler', () => {
     expect(order).toEqual(['log', 'report']);
   });
 
+  it('does not wait for the reporter: a stalled collector never delays the 500', async () => {
+    const report = vi.fn(() => new Promise<void>(() => undefined));
+    const api = createHandler(createDeps({ doc: downDoc, table: 't', jwtSecret: SECRET, log: () => undefined, report }));
+    const token = await signToken({ id: 'p-1', role: 'passenger' }, SECRET);
+    const started = performance.now();
+
+    expect((await api(event('GET', '/me/trips', token))).statusCode).toBe(500);
+    expect(report).toHaveBeenCalledOnce();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it('depsFromEnv turns reporting on only with SENTRY_DSN', () => {
     const base = { RIDECORE_TABLE: 't', RIDECORE_JWT_SECRET: SECRET };
     expect(depsFromEnv(base).report).toBeUndefined();

@@ -75,7 +75,9 @@ export function createErrorReporter(dsn: string, opts: ReporterOptions = {}): Er
       ...(opts.release ? { release: opts.release } : {}),
       ...(opts.environment ? { environment: opts.environment } : {}),
       exception: { values: [exceptionOf(err)] },
-      tags: Object.fromEntries(Object.entries(context).filter(([, v]) => v !== undefined)),
+      tags: Object.fromEntries(
+        Object.entries(context).flatMap(([k, v]) => (v === undefined ? [] : [[k, redact(v)]])),
+      ),
     };
     try {
       await send(storeUrl, {
@@ -94,26 +96,38 @@ export function createErrorReporter(dsn: string, opts: ReporterOptions = {}): Er
 
 type Frame = { function?: string; filename: string; lineno?: number; colno?: number; in_app: boolean };
 
-/** Bearer credentials and JWT-shaped strings never leave the process, whatever message carries them. */
+/**
+ * Bearer credentials and token-shaped strings (three base64url segments, the JWS compact form, with or
+ * without the usual `eyJ` prefix) never leave the process, whatever field carries them.
+ */
 export function redact(text: string): string {
   return text
     .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
-    .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, '[redacted]');
+    .replace(/[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, '[redacted]');
 }
 
 function exceptionOf(err: unknown) {
   if (!(err instanceof Error)) return { type: 'Error', value: redact(String(err)) };
-  const frames = framesOf(err.stack);
+  const frames = framesOf(stackFrames(err));
   return { type: err.name, value: redact(err.message), ...(frames.length > 0 ? { stacktrace: { frames } } : {}) };
 }
 
-/** V8 stack lines → Sentry frames, oldest first (Sentry's order). */
-function framesOf(stack: string | undefined): Frame[] {
+/** The frame lines of a V8 stack: what follows the `Name: message` header, which may span lines. */
+function stackFrames(err: Error): string {
+  const stack = err.stack ?? '';
+  const header = err.message === '' ? err.name : `${err.name}: ${err.message}`;
+  return stack.startsWith(header) ? stack.slice(header.length) : '';
+}
+
+/** V8 frame lines → Sentry frames, oldest first (Sentry's order). Names and paths are redacted too. */
+function framesOf(frameLines: string): Frame[] {
   const frames: Frame[] = [];
-  for (const line of (stack ?? '').split('\n').slice(1)) {
+  for (const line of frameLines.split('\n')) {
     const m = /^\s*at (?:async )?(?:(.+?) \()?(.+?):(\d+):(\d+)\)?$/.exec(line);
     if (m === null) continue;
-    const [, fn, filename = '', lineno, colno] = m;
+    const [, rawFn, rawFile = '', lineno, colno] = m;
+    const fn = rawFn === undefined ? undefined : redact(rawFn);
+    const filename = redact(rawFile);
     frames.push({
       ...(fn ? { function: fn } : {}),
       filename,

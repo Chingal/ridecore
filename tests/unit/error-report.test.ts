@@ -90,6 +90,24 @@ describe('createErrorReporter', () => {
     expect(event.exception.values[0].value).toContain('[redacted]');
   });
 
+  it('redacts JWTs without the usual eyJ prefix, in tags too', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    const odd = 'ICB7ImFsZyI6IkhTMjU2In0.eyJzdWIiOiJwLTEifQx.c2lnbmF0dXJlLXZhbHVl';
+    await createErrorReporter(DSN, { fetch })(new Error(`bad ${odd}`), { correlationId: odd });
+    const body = (fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string;
+    expect(body).not.toContain(odd);
+  });
+
+  it('never parses stack frames out of a multiline message', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    const secret = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwLTEifQ.c2lnbmF0dXJlLXZhbHVl';
+    const err = new Error(`first\n    at ${secret}:1:1`);
+    await createErrorReporter(DSN, { fetch })(err, {});
+    const body = (fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string;
+    expect(body).not.toContain(secret);
+    expect(JSON.parse(body).exception.values[0].stacktrace.frames.some((f: { filename: string }) => f.filename.includes('error-report.test'))).toBe(true);
+  });
+
   it('parses anonymous async frames without the "async " prefix in the filename', async () => {
     const fetch = vi.fn(async () => new Response('{}'));
     const err = new Error('x');

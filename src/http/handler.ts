@@ -139,7 +139,7 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
 
   /**
    * Best effort, after the log line and bounded by the reporter's timeout; a reporter failure (sync or
-   * async) never changes the answer. Tags carry the route name, never the raw path: a path segment can
+   * async) is swallowed here, so the un-awaited call can never become an unhandled rejection. Tags carry the route name, never the raw path: a path segment can
    * hold anything the client sent, a token included.
    */
   async function report(err: unknown, correlationId: string, method: string, path: string): Promise<void> {
@@ -181,7 +181,9 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
     line.status = response.statusCode;
     line.durationMs = Math.round((performance.now() - started) * 100) / 100;
     (deps?.log ?? jsonLog)(line);
-    if (failed) await report(failure, correlationId, method, path);
+    // Not awaited: a slow or stalled collector must never delay or replace the 500. On Lambda an event
+    // still in flight when the invocation ends is sent on the next thaw or lost; reporting is best effort.
+    if (failed) void report(failure, correlationId, method, path);
     return response;
   };
 }
