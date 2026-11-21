@@ -155,6 +155,8 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
         line.level = 'error';
         line.error = err instanceof Error ? err.message : String(err);
         if (err instanceof Error && err.stack !== undefined) line.stack = err.stack;
+        // Best effort, bounded by the reporter's timeout; a reporter failure never changes the answer.
+        await deps?.report?.(err, { correlationId, method, path }).catch(() => undefined);
       } else {
         line.level = 'warn';
       }

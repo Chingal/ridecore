@@ -7,6 +7,7 @@ import { DriverRepo } from '../infra/dynamo/driver-repo.ts';
 import { IdempotencyRepo } from '../infra/dynamo/idempotency-repo.ts';
 import { createLocationClient, createLocationNearby } from '../infra/location/client.ts';
 import { TripRepo } from '../infra/dynamo/trip-repo.ts';
+import { type ErrorReporter, errorReporterFromEnv } from '../error-report.ts';
 import { jsonLog, type Logger } from '../log.ts';
 
 export type { LogLine, Logger } from '../log.ts';
@@ -22,6 +23,8 @@ export interface Deps {
   /** Server clock for every use case (rating window, timestamps, idempotency leases). */
   now: () => Date;
   log: Logger;
+  /** Unexpected (5xx) failures go here when SENTRY_DSN is set; absent = reporting off. */
+  report?: ErrorReporter;
 }
 
 export type DepsOptions = {
@@ -32,6 +35,7 @@ export type DepsOptions = {
   log?: Logger;
   /** ridecore-location (RIDECORE_LOCATION_URL); null or absent keeps dispatch on the DynamoDB index. */
   location?: LocationConfig | null;
+  report?: ErrorReporter;
 };
 
 export type LocationConfig = { url: string; key: string };
@@ -49,6 +53,7 @@ export function createDeps(opts: DepsOptions): Deps {
     jwtSecret: opts.jwtSecret,
     now,
     log,
+    ...(opts.report ? { report: opts.report } : {}),
   };
 }
 
@@ -92,7 +97,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): Deps {
   const table = env.RIDECORE_TABLE;
   if (!table) throw new Error('RIDECORE_TABLE is not set');
   const jwtSecret = jwtSecretFromEnv(env);
-  return createDeps({ doc: createDocumentClient(), table, jwtSecret, location: locationFromEnv(env) });
+  return createDeps({ doc: createDocumentClient(), table, jwtSecret, location: locationFromEnv(env), report: errorReporterFromEnv(env) });
 }
 
 /** The use cases wired to `deps`. Cheap: plain closures over the repositories. */
