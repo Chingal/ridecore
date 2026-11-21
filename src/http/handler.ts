@@ -137,6 +137,21 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
     };
   }
 
+  /**
+   * Best effort, after the log line and bounded by the reporter's timeout; a reporter failure (sync or
+   * async) is swallowed here, so the un-awaited call can never become an unhandled rejection. Tags carry the route name, never the raw path: a path segment can
+   * hold anything the client sent, a token included.
+   */
+  async function report(err: unknown, correlationId: string, method: string, path: string): Promise<void> {
+    if (deps?.report === undefined) return;
+    try {
+      const route = matchRoute(method, path)?.route.name ?? 'unmatched';
+      await deps.report(err, { correlationId, method, route });
+    } catch {
+      // Reporting is optional; the 500 and its log line already happened.
+    }
+  }
+
   return async (event) => {
     const started = performance.now();
     const correlationId = correlationIdOf(event);
@@ -144,6 +159,8 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
     const path = event.rawPath;
     const line: LogLine = { level: 'info', msg: 'request', correlationId, method, path };
     let response: APIGatewayProxyStructuredResultV2;
+    let failure: unknown;
+    let failed = false;
     try {
       const out = await runWithCorrelation(correlationId, () => route(event, method, path));
       response = json(out.status, out.body, correlationId, out.headers);
@@ -155,6 +172,8 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
         line.level = 'error';
         line.error = err instanceof Error ? err.message : String(err);
         if (err instanceof Error && err.stack !== undefined) line.stack = err.stack;
+        failed = true;
+        failure = err;
       } else {
         line.level = 'warn';
       }
@@ -162,6 +181,9 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
     line.status = response.statusCode;
     line.durationMs = Math.round((performance.now() - started) * 100) / 100;
     (deps?.log ?? jsonLog)(line);
+    // Not awaited: a slow or stalled collector must never delay or replace the 500. On Lambda an event
+    // still in flight when the invocation ends is sent on the next thaw or lost; reporting is best effort.
+    if (failed) void report(failure, correlationId, method, path);
     return response;
   };
 }

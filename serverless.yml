@@ -28,6 +28,11 @@ provider:
     # they use their own URL (http://host.docker.internal:8090, ridecore-location ADR 0001).
     RIDECORE_LOCATION_URL: ${env:RIDECORE_LOCATION_LAMBDA_URL, ''}
     RIDECORE_LOCATION_KEY: ${env:RIDECORE_LOCATION_KEY, ''}
+    # Error reporting (optional, src/error-report.ts): empty = off. Lambdas on Floci run in Docker, so a
+    # local GlitchTip needs a host.docker.internal DSN here, not the localhost one `npm run dev` uses.
+    SENTRY_DSN: ${env:SENTRY_LAMBDA_DSN, ''}
+    SENTRY_ENVIRONMENT: ${env:SENTRY_ENVIRONMENT, ''}
+    SENTRY_RELEASE: ${env:SENTRY_RELEASE, ''}
   iam:
     role:
       statements:
