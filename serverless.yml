@@ -31,6 +31,8 @@ provider:
     # Error reporting (optional, src/error-report.ts): empty = off. Lambdas on Floci run in Docker, so a
     # local GlitchTip needs a host.docker.internal DSN here, not the localhost one `npm run dev` uses.
     SENTRY_DSN: ${env:SENTRY_LAMBDA_DSN, ''}
+    SENTRY_ENVIRONMENT: ${env:SENTRY_ENVIRONMENT, ''}
+    SENTRY_RELEASE: ${env:SENTRY_RELEASE, ''}
   iam:
     role:
       statements:

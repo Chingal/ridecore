@@ -94,6 +94,9 @@ export function createErrorReporter(dsn: string, opts: ReporterOptions = {}): Er
   };
 }
 
+const MAX_TEXT = 2048;
+const MAX_FRAMES = 50;
+
 type Frame = { function?: string; filename: string; lineno?: number; colno?: number; in_app: boolean };
 
 /**
@@ -101,7 +104,9 @@ type Frame = { function?: string; filename: string; lineno?: number; colno?: num
  * without the usual `eyJ` prefix) never leave the process, whatever field carries them.
  */
 export function redact(text: string): string {
-  return text
+  // Bounded first: an error message can be huge, and nothing past this helps triage.
+  const bounded = text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}…[truncated]` : text;
+  return bounded
     .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
     .replace(/[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, '[redacted]');
 }
@@ -112,17 +117,21 @@ function exceptionOf(err: unknown) {
   return { type: err.name, value: redact(err.message), ...(frames.length > 0 ? { stacktrace: { frames } } : {}) };
 }
 
-/** The frame lines of a V8 stack: what follows the `Name: message` header, which may span lines. */
+/**
+ * The frame lines of a V8 stack: what follows the header. The header is `Name: message` or
+ * `Name [CODE]: message` and the message may span lines, so it ends where the message ends.
+ */
 function stackFrames(err: Error): string {
   const stack = err.stack ?? '';
-  const header = err.message === '' ? err.name : `${err.name}: ${err.message}`;
-  return stack.startsWith(header) ? stack.slice(header.length) : '';
+  if (err.message === '') return stack.slice(stack.indexOf('\n') + 1);
+  const at = stack.indexOf(err.message);
+  return at < 0 ? '' : stack.slice(at + err.message.length);
 }
 
 /** V8 frame lines → Sentry frames, oldest first (Sentry's order). Names and paths are redacted too. */
 function framesOf(frameLines: string): Frame[] {
   const frames: Frame[] = [];
-  for (const line of frameLines.split('\n')) {
+  for (const line of frameLines.split('\n').slice(0, MAX_FRAMES)) {
     const m = /^\s*at (?:async )?(?:(.+?) \()?(.+?):(\d+):(\d+)\)?$/.exec(line);
     if (m === null) continue;
     const [, rawFn, rawFile = '', lineno, colno] = m;

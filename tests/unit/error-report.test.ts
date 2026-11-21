@@ -108,6 +108,24 @@ describe('createErrorReporter', () => {
     expect(JSON.parse(body).exception.values[0].stacktrace.frames.some((f: { filename: string }) => f.filename.includes('error-report.test'))).toBe(true);
   });
 
+  it('redacts a huge message quickly (bounded size, no quadratic scan)', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    const started = performance.now();
+    await createErrorReporter(DSN, { fetch })(new Error('a'.repeat(40_000)), {});
+    expect(performance.now() - started).toBeLessThan(200);
+    const event = JSON.parse((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(event.exception.values[0].value.length).toBeLessThanOrEqual(2100);
+  });
+
+  it('keeps the frames of Node errors with a bracketed code (TypeError [ERR_X]: ...)', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    const err = Object.assign(new TypeError('bad header'), { code: 'ERR_INVALID_CHAR' });
+    err.stack = 'TypeError [ERR_INVALID_CHAR]: bad header\n    at check (node:_http_common:1:1)\n    at run (file:///app/a.ts:2:3)';
+    await createErrorReporter(DSN, { fetch })(err, {});
+    const event = JSON.parse((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(event.exception.values[0].stacktrace.frames.map((f: { filename: string }) => f.filename)).toEqual(['file:///app/a.ts', 'node:_http_common']);
+  });
+
   it('parses anonymous async frames without the "async " prefix in the filename', async () => {
     const fetch = vi.fn(async () => new Response('{}'));
     const err = new Error('x');
