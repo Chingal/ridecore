@@ -15,8 +15,10 @@ export type ReporterOptions = {
   environment?: string;
 };
 
-/** `scheme://key@host[/prefix]/project` → store endpoint and public key. Errors never echo the DSN. */
-export function parseDsn(dsn: string): { storeUrl: string; publicKey: string } {
+export type ParsedDsn = { storeUrl: string; publicKey: string; secretKey?: string };
+
+/** `http(s)://key[:secret]@host[/prefix]/project` → store endpoint and keys. Errors never echo the DSN. */
+export function parseDsn(dsn: string): ParsedDsn {
   let url: URL;
   try {
     url = new URL(dsn);
@@ -25,26 +27,44 @@ export function parseDsn(dsn: string): { storeUrl: string; publicKey: string } {
   }
   const parts = url.pathname.split('/').filter(Boolean);
   const project = parts.pop();
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('SENTRY_DSN is not a valid DSN');
   if (!url.username || project === undefined || !/^\d+$/.test(project)) throw new Error('SENTRY_DSN is not a valid DSN');
   const prefix = parts.length > 0 ? `/${parts.join('/')}` : '';
-  return { storeUrl: `${url.protocol}//${url.host}${prefix}/api/${project}/store/`, publicKey: url.username };
+  return {
+    storeUrl: `${url.protocol}//${url.host}${prefix}/api/${project}/store/`,
+    publicKey: decodeURIComponent(url.username),
+    ...(url.password ? { secretKey: decodeURIComponent(url.password) } : {}),
+  };
 }
 
-/** The reporter from `SENTRY_DSN`, or undefined (reporting off) when it is unset or blank. */
-export function errorReporterFromEnv(env: NodeJS.ProcessEnv = process.env): ErrorReporter | undefined {
+/**
+ * The reporter from `SENTRY_DSN`, or undefined (reporting off) when it is unset or blank. A malformed
+ * DSN also turns reporting off, with a warning that never contains the DSN: optional telemetry must
+ * not stop the API from starting.
+ */
+export function errorReporterFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = (message) => console.warn(JSON.stringify({ level: 'warn', msg: message })),
+): ErrorReporter | undefined {
   const dsn = env.SENTRY_DSN?.trim();
   if (!dsn) return undefined;
-  return createErrorReporter(dsn, {
-    ...(env.SENTRY_RELEASE ? { release: env.SENTRY_RELEASE } : {}),
-    ...(env.SENTRY_ENVIRONMENT ? { environment: env.SENTRY_ENVIRONMENT } : {}),
-  });
+  try {
+    return createErrorReporter(dsn, {
+      ...(env.SENTRY_RELEASE ? { release: env.SENTRY_RELEASE } : {}),
+      ...(env.SENTRY_ENVIRONMENT ? { environment: env.SENTRY_ENVIRONMENT } : {}),
+    });
+  } catch {
+    warn('SENTRY_DSN is not a valid DSN; error reporting is off');
+    return undefined;
+  }
 }
 
 export function createErrorReporter(dsn: string, opts: ReporterOptions = {}): ErrorReporter {
-  const { storeUrl, publicKey } = parseDsn(dsn);
+  const { storeUrl, publicKey, secretKey } = parseDsn(dsn);
   const send = opts.fetch ?? globalThis.fetch;
-  const timeoutMs = opts.timeoutMs ?? 2000;
-  const auth = `Sentry sentry_version=7, sentry_key=${publicKey}, sentry_client=ridecore/1`;
+  const timeoutMs = opts.timeoutMs ?? 1000;
+  const secret = secretKey === undefined ? '' : `, sentry_secret=${secretKey}`;
+  const auth = `Sentry sentry_version=7, sentry_key=${publicKey}${secret}, sentry_client=ridecore/1`;
 
   return async (err, context) => {
     const event = {
@@ -62,6 +82,8 @@ export function createErrorReporter(dsn: string, opts: ReporterOptions = {}): Er
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-sentry-auth': auth },
         body: JSON.stringify(event),
+        // A redirect would carry the event and the key to another origin.
+        redirect: 'error',
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch {
@@ -72,17 +94,24 @@ export function createErrorReporter(dsn: string, opts: ReporterOptions = {}): Er
 
 type Frame = { function?: string; filename: string; lineno?: number; colno?: number; in_app: boolean };
 
+/** Bearer credentials and JWT-shaped strings never leave the process, whatever message carries them. */
+export function redact(text: string): string {
+  return text
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, '[redacted]');
+}
+
 function exceptionOf(err: unknown) {
-  if (!(err instanceof Error)) return { type: 'Error', value: String(err) };
+  if (!(err instanceof Error)) return { type: 'Error', value: redact(String(err)) };
   const frames = framesOf(err.stack);
-  return { type: err.name, value: err.message, ...(frames.length > 0 ? { stacktrace: { frames } } : {}) };
+  return { type: err.name, value: redact(err.message), ...(frames.length > 0 ? { stacktrace: { frames } } : {}) };
 }
 
 /** V8 stack lines → Sentry frames, oldest first (Sentry's order). */
 function framesOf(stack: string | undefined): Frame[] {
   const frames: Frame[] = [];
   for (const line of (stack ?? '').split('\n').slice(1)) {
-    const m = /^\s*at (?:(.+?) \()?(.+?):(\d+):(\d+)\)?$/.exec(line);
+    const m = /^\s*at (?:async )?(?:(.+?) \()?(.+?):(\d+):(\d+)\)?$/.exec(line);
     if (m === null) continue;
     const [, fn, filename = '', lineno, colno] = m;
     frames.push({

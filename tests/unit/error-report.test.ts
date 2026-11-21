@@ -16,14 +16,27 @@ describe('parseDsn', () => {
   });
 
   it('rejects a DSN without key or project id, without echoing it', () => {
-    for (const bad of ['http://localhost:8000/7', 'http://k@localhost:8000/', 'not a url']) {
+    for (const bad of ['http://localhost:8000/7', 'http://k@localhost:8000/', 'not a url', 'ftp://k@collector.example/7']) {
       expect(() => parseDsn(bad)).toThrow('SENTRY_DSN is not a valid DSN');
       expect(() => parseDsn(bad)).not.toThrow(bad);
     }
   });
 });
 
+describe('parseDsn legacy secret', () => {
+  it('keeps a legacy key:secret pair for older collectors', () => {
+    expect(parseDsn('https://k:s@errors.example.com/3')).toMatchObject({ publicKey: 'k', secretKey: 's' });
+  });
+});
+
 describe('errorReporterFromEnv', () => {
+  it('turns reporting off (does not throw) on a malformed DSN, and warns without echoing it', () => {
+    const warn = vi.fn();
+    expect(errorReporterFromEnv({ SENTRY_DSN: 'not-a-dsn-secret' }, warn)).toBeUndefined();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('not-a-dsn-secret');
+  });
+
   it('is off (undefined) when SENTRY_DSN is unset or blank', () => {
     expect(errorReporterFromEnv({})).toBeUndefined();
     expect(errorReporterFromEnv({ SENTRY_DSN: '  ' })).toBeUndefined();
@@ -60,6 +73,31 @@ describe('createErrorReporter', () => {
     await createErrorReporter(DSN, { fetch })('plain', {});
     const event = JSON.parse((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
     expect(event.exception.values[0]).toMatchObject({ type: 'Error', value: 'plain' });
+  });
+
+  it('refuses redirects, so the event and key never reach another origin', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    await createErrorReporter(DSN, { fetch })(new Error('x'), {});
+    expect((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].redirect).toBe('error');
+  });
+
+  it('redacts bearer tokens and JWTs from the message', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwLTEifQ.c2lnbmF0dXJlLXZhbHVl';
+    await createErrorReporter(DSN, { fetch })(new Error(`failed for Bearer ${jwt} and ${jwt}`), {});
+    const event = JSON.parse((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(JSON.stringify(event)).not.toContain(jwt);
+    expect(event.exception.values[0].value).toContain('[redacted]');
+  });
+
+  it('parses anonymous async frames without the "async " prefix in the filename', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    const err = new Error('x');
+    err.stack = 'Error: x\n    at async file:///app/src/a.ts:40:3\n    at async run (file:///app/src/b.ts:7:9)';
+    await createErrorReporter(DSN, { fetch })(err, {});
+    const event = JSON.parse((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    const files = event.exception.values[0].stacktrace.frames.map((f: { filename: string }) => f.filename);
+    expect(files).toEqual(['file:///app/src/b.ts', 'file:///app/src/a.ts']);
   });
 
   it('never throws: a failing or slow transport is swallowed', async () => {

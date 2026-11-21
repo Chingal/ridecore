@@ -34,7 +34,7 @@ describe('error reporting from the HTTP handler', () => {
     expect(report).toHaveBeenCalledOnce();
     const [err, context] = report.mock.calls[0] as unknown as [Error, Record<string, string>];
     expect(err.message).toBe('dynamodb unavailable');
-    expect(context).toEqual({ correlationId: 'corr-1', method: 'GET', path: '/me/trips' });
+    expect(context).toEqual({ correlationId: 'corr-1', method: 'GET', route: 'listMyTrips' });
   });
 
   it('does not report domain errors (4xx are answers, not bugs)', async () => {
@@ -52,6 +52,29 @@ describe('error reporting from the HTTP handler', () => {
     const token = await signToken({ id: 'p-1', role: 'passenger' }, SECRET);
 
     expect((await api(event('GET', '/me/trips', token))).statusCode).toBe(500);
+  });
+
+  it('tags the route name, never the raw path (a path segment can carry a token)', async () => {
+    const report = vi.fn(async () => undefined);
+    const api = createHandler(createDeps({ doc: downDoc, table: 't', jwtSecret: SECRET, log: () => undefined, report }));
+    const token = await signToken({ id: 'p-1', role: 'passenger' }, SECRET);
+    const ev = event('POST', `/trips/${token}/cancel`, token);
+    ev.headers['idempotency-key'] = 'k-1';
+
+    expect((await api(ev)).statusCode).toBe(500);
+    const context = (report.mock.calls[0] as unknown as [Error, Record<string, string>])[1];
+    expect(JSON.stringify(context)).not.toContain(token);
+    expect(context.route).toBe('cancelTrip');
+  });
+
+  it('logs the request line before reporting, and survives a reporter that throws synchronously', async () => {
+    const order: string[] = [];
+    const report = vi.fn((): Promise<void> => { order.push('report'); throw new Error('sync bug'); });
+    const api = createHandler(createDeps({ doc: downDoc, table: 't', jwtSecret: SECRET, log: () => order.push('log'), report }));
+    const token = await signToken({ id: 'p-1', role: 'passenger' }, SECRET);
+
+    expect((await api(event('GET', '/me/trips', token))).statusCode).toBe(500);
+    expect(order).toEqual(['log', 'report']);
   });
 
   it('depsFromEnv turns reporting on only with SENTRY_DSN', () => {
