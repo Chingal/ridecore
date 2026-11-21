@@ -34,7 +34,7 @@ export type AvailabilityInput = { status: 'AVAILABLE' | 'OFFLINE' };
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
-const validationError =(message: string) => new DomainError('VALIDATION_ERROR', 400, message);
+const validationError = (message: string) => new DomainError('VALIDATION_ERROR', 400, message);
 
 /** Parses with `schema`; any issue becomes 400 VALIDATION_ERROR naming the field path (`origin.lat: ...`). */
 function parse<S extends z.ZodType>(schema: S, body: unknown): z.output<S> {
