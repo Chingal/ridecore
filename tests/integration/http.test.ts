@@ -654,7 +654,8 @@ describe('errors and logging', () => {
   it('an unsafe correlation id header is replaced by a fresh one', async () => {
     const api = createHandler(deps());
     const res = await send(api, 'GET', '/me/trips', { headers: { 'x-correlation-id': 'bad id\n{"level":"info"}' } });
-    expect(res.headers['x-correlation-id']).not.toContain('bad');
+    // A fresh UUID, not the input: a substring check would flake when the random UUID contains "bad".
+    expect(res.headers['x-correlation-id']).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(logs[0]?.correlationId).toBe(res.headers['x-correlation-id']);
   });
 });
