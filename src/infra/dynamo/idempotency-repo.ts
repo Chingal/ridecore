@@ -194,14 +194,15 @@ export class IdempotencyRepo {
     }
     const response = item.response as { status: number; body: T } | undefined;
     if (response !== undefined) return { replay: { status: response.status, body: response.body, replayed: true } };
-    if (typeof item.leaseUntil !== 'number' || item.leaseUntil >= nowSec) throw inProgress();
+    // Same boundary as `expiresAt`: the lease is over once `leaseUntil <= now` (whole seconds).
+    if (typeof item.leaseUntil !== 'number' || item.leaseUntil > nowSec) throw inProgress();
     try {
       await this.doc.send(
         new UpdateCommand({
           TableName: this.tableName,
           Key,
           UpdateExpression: 'SET leaseUntil = :next, #owner = :owner',
-          ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(#response) AND leaseUntil < :now AND requestHash = :hash',
+          ConditionExpression: 'attribute_exists(PK) AND attribute_not_exists(#response) AND leaseUntil <= :now AND requestHash = :hash',
           ExpressionAttributeNames: { '#response': 'response', '#owner': 'owner' },
           ExpressionAttributeValues: { ':owner': owner, ':next': nowSec + IDEMPOTENCY_LEASE_SECONDS, ':now': nowSec, ':hash': requestHash },
         }),
