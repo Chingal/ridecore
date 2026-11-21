@@ -117,6 +117,27 @@ describe('createErrorReporter', () => {
     expect(event.exception.values[0].value.length).toBeLessThanOrEqual(2100);
   });
 
+  it('never leaks part of a token cut by the size bound', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEyMyIsInJvbGUiOiJyaWRlciJ9.c2lnbmF0dXJlLXZhbHVlLWxvbmc';
+    for (const pad of [1988, 2000, 2030, 2040]) {
+      await createErrorReporter(DSN, { fetch })(new Error(`${'x'.repeat(pad)} ${jwt}`), {});
+    }
+    for (const call of fetch.mock.calls as unknown as [string, RequestInit][]) {
+      expect(call[1].body as string).not.toContain('eyJzdWIi');
+      expect(call[1].body as string).not.toContain('eyJhbGci');
+    }
+  });
+
+  it('redacts the error name too (SDK errors build it from the response)', async () => {
+    const fetch = vi.fn(async () => new Response('{}'));
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwLTEifQ.c2lnbmF0dXJlLXZhbHVl';
+    const err = new Error('x');
+    err.name = jwt;
+    await createErrorReporter(DSN, { fetch })(err, {});
+    expect((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).not.toContain(jwt);
+  });
+
   it('keeps the frames of Node errors with a bracketed code (TypeError [ERR_X]: ...)', async () => {
     const fetch = vi.fn(async () => new Response('{}'));
     const err = Object.assign(new TypeError('bad header'), { code: 'ERR_INVALID_CHAR' });

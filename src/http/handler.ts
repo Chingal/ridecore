@@ -144,8 +144,8 @@ export function createHandler(source: Deps | (() => Deps)): ApiHandler {
    */
   async function report(err: unknown, correlationId: string, method: string, path: string): Promise<void> {
     if (deps?.report === undefined) return;
-    const route = matchRoute(method, path)?.route.name ?? 'unmatched';
     try {
+      const route = matchRoute(method, path)?.route.name ?? 'unmatched';
       await deps.report(err, { correlationId, method, route });
     } catch {
       // Reporting is optional; the 500 and its log line already happened.

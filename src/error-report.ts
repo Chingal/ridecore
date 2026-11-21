@@ -95,6 +95,12 @@ export function createErrorReporter(dsn: string, opts: ReporterOptions = {}): Er
 }
 
 const MAX_TEXT = 2048;
+
+function dropTrailingTokenRun(text: string): string {
+  let end = text.length;
+  while (end > 0 && /[\w.-]/.test(text[end - 1] as string)) end--;
+  return text.slice(0, end);
+}
 const MAX_FRAMES = 50;
 
 type Frame = { function?: string; filename: string; lineno?: number; colno?: number; in_app: boolean };
@@ -105,7 +111,9 @@ type Frame = { function?: string; filename: string; lineno?: number; colno?: num
  */
 export function redact(text: string): string {
   // Bounded first: an error message can be huge, and nothing past this helps triage.
-  const bounded = text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}…[truncated]` : text;
+  // The cut can land inside a token, leaving a fragment the token pattern no longer matches, so the
+  // token-character run touching the cut is dropped whole. A linear scan, not a regex, keeps it cheap.
+  const bounded = text.length > MAX_TEXT ? `${dropTrailingTokenRun(text.slice(0, MAX_TEXT))}…[truncated]` : text;
   return bounded
     .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
     .replace(/[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, '[redacted]');
@@ -114,7 +122,7 @@ export function redact(text: string): string {
 function exceptionOf(err: unknown) {
   if (!(err instanceof Error)) return { type: 'Error', value: redact(String(err)) };
   const frames = framesOf(stackFrames(err));
-  return { type: err.name, value: redact(err.message), ...(frames.length > 0 ? { stacktrace: { frames } } : {}) };
+  return { type: redact(err.name), value: redact(err.message), ...(frames.length > 0 ? { stacktrace: { frames } } : {}) };
 }
 
 /**
