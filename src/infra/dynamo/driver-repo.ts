@@ -394,7 +394,8 @@ export class DriverRepo {
   /**
    * Read-then-conditional-write of availability/position. GSI2 keys cannot be built from stored
    * attributes inside an UpdateExpression, so the next state is computed from a read and written
-   * only if availability and cell are still what was read; otherwise it re-reads (a few times).
+   * only if availability and cell (and, in a transaction that keeps the position, the position) are
+   * still what was read; otherwise it re-reads (a few times).
    * With `commit`, the update and `commit(written)` go in ONE transaction; a failed condition on the
    * driver re-reads as above, a failed condition on the commit item raises that item's error.
    */
@@ -427,6 +428,19 @@ export class DriverRepo {
         condition += ' AND geohash5 = :seenGh';
         values[':seenGh'] = current.geohash5;
       }
+      // A transaction that keeps the stored position also stores it in `commit(written)`, so it must
+      // still be the one read (a move within the same cell leaves availability and geohash5 unchanged).
+      // A single update needs no such condition: it returns the row it left (ALL_NEW).
+      const keepsPosition = target.position === undefined;
+      if (keepsPosition && commit !== undefined) {
+        if (current.position === undefined) {
+          condition += ' AND attribute_not_exists(#position)';
+        } else {
+          condition += ' AND #position.#lat = :seenLat AND #position.#lng = :seenLng';
+          values[':seenLat'] = current.position.lat;
+          values[':seenLng'] = current.position.lng;
+        }
+      }
 
       const update = {
         TableName: this.tableName,
@@ -435,7 +449,8 @@ export class DriverRepo {
         ConditionExpression: condition,
         ExpressionAttributeNames: {
           '#availability': 'availability',
-          ...(target.position === undefined ? {} : { '#position': 'position' }),
+          ...(keepsPosition && commit === undefined ? {} : { '#position': 'position' }),
+          ...(keepsPosition && commit !== undefined && current.position !== undefined ? { '#lat': 'lat', '#lng': 'lng' } : {}),
         },
         ExpressionAttributeValues: values,
       };
@@ -448,8 +463,12 @@ export class DriverRepo {
       };
       if (commit === undefined) {
         try {
-          await this.doc.send(new UpdateCommand(update));
-          return written;
+          if (!keepsPosition) {
+            await this.doc.send(new UpdateCommand(update));
+            return written;
+          }
+          const res = await this.doc.send(new UpdateCommand({ ...update, ReturnValues: 'ALL_NEW' }));
+          return res.Attributes ? toDriver(res.Attributes) : written;
         } catch (err) {
           if (!(err instanceof ConditionalCheckFailedException)) throw err;
         }
