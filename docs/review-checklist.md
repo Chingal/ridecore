@@ -117,3 +117,10 @@ A living list of the mistakes reviews have actually found in this repo. Each cat
 - **Why:** An explicit `(e, i) => tagExtra(e, i)` documents the intent and keeps the rule useful.
 - **Source:** #8 (SonarQube S7727, fixed in #9).
 - **Enforced by:** SonarQube (S7727).
+
+### C17. A regression test must fail against the plausible wrong implementation
+- **Rule:** Arrange fixtures so the naive or buggy variant of the fix produces a different result. Do not let the input order or mock data hand the correct answer to a wrong implementation; check that the test fails when the fix is reverted or done the simple wrong way.
+- **Why:** A test for keeping the nearest copy of a duplicated driver also passed when deduplication kept the first copy before sorting, because the mock returned the closer copy in the cell processed first.
+- **Example:** put the farther duplicate in the first queried cell, so "keep first" and "keep nearest" disagree.
+- **Source:** #16.
+- **Enforced by:** reviewer.
