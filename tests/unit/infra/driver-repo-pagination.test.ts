@@ -43,6 +43,34 @@ describe('DriverRepo.availableNear pagination', () => {
     expect(startKeys).toEqual([undefined, { PK: 'DRIVER#mid', SK: 'META' }]);
   });
 
+  it('returns a driver once when a neighbour cell repeats', async () => {
+    const position = { lat: 90, lng: 0 };
+    const geohash5 = cellOf(position);
+    const d = { ...driver('d1', 0), position, geohash5 };
+    const doc = {
+      send: async (cmd: QueryCommand) => ({
+        Items: cmd.input.ExpressionAttributeValues?.[':pk'] === `AVAIL#${geohash5}` ? [d] : [],
+      }),
+    } as unknown as DynamoDBDocumentClient;
+    const nearby = await new DriverRepo(doc, 'stub').availableNear(position, 5);
+    expect(nearby.map((x) => x.id)).toEqual(['d1']);
+  });
+
+  it('keeps only the nearest copy of a driver read from two cells', async () => {
+    const centerPk = `AVAIL#${cellOf(CENTER)}`;
+    const stale = driver('d1', 3);
+    const fresh = driver('d1', 0.1);
+    // The farther copy comes from the centre cell, which is read first, so keeping the first copy seen fails.
+    const doc = {
+      send: async (cmd: QueryCommand) => ({
+        Items: cmd.input.ExpressionAttributeValues?.[':pk'] === centerPk ? [stale, driver('d2', 1)] : [fresh],
+      }),
+    } as unknown as DynamoDBDocumentClient;
+    const nearby = await new DriverRepo(doc, 'stub').availableNear(CENTER, 5);
+    expect(nearby.map((x) => x.id)).toEqual(['d1', 'd2']);
+    expect(nearby[0]?.position).toEqual(fresh.position);
+  });
+
   it('refuses to read past the page cap instead of truncating silently', async () => {
     let calls = 0;
     const send = () => {
