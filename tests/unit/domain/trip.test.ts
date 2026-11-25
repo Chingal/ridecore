@@ -172,6 +172,82 @@ describe('RATE', () => {
   });
 });
 
+describe('COMPLETE timestamp ordering', () => {
+  const DAY = 24 * 3600 * 1000;
+  const at = (ms: number): Date => new Date(t0.getTime() + ms);
+
+  it('keeps applied transitions in time order', () => {
+    const arrived = makeTrip('DRIVER_ARRIVED');
+    const started = transition(arrived, { type: 'START' }, d1, at(5_000));
+    const completed = transition(started, { type: 'COMPLETE' }, d1, t0);
+    expect(Date.parse(toEvent(started, completed).occurredAt)).toBeGreaterThanOrEqual(
+      Date.parse(toEvent(arrived, started).occurredAt),
+    );
+  });
+
+  it('keeps the request clock when it is already after START', () => {
+    const started = transition(makeTrip('DRIVER_ARRIVED'), { type: 'START' }, d1, at(5_000));
+    const completed = transition(started, { type: 'COMPLETE' }, d1, at(9_000));
+    expect(completed.timestamps.COMPLETED).toBe(at(9_000).toISOString());
+  });
+
+  it('skewed START/COMPLETE clocks: completion and rating window move by the skew only', () => {
+    // START request clock is 5 s ahead of the COMPLETE request clock.
+    const started = transition(makeTrip('DRIVER_ARRIVED'), { type: 'START' }, d1, at(5_000));
+    const completed = transition(started, { type: 'COMPLETE' }, d1, t0);
+    expect(completed.timestamps.COMPLETED).toBe(at(5_000).toISOString());
+    expect(transition(completed, { type: 'RATE', score: 4 }, passenger, at(5_000 + DAY)).state).toBe('RATED');
+    expectDomainError(
+      () => transition(completed, { type: 'RATE', score: 4 }, passenger, at(5_000 + DAY + 1)),
+      422,
+      'RATING_WINDOW_CLOSED',
+    );
+  });
+
+  it('a RATE read before the clamped completion is not stamped before COMPLETED', () => {
+    const arrived = makeTrip('DRIVER_ARRIVED');
+    const started = transition(arrived, { type: 'START' }, d1, at(5_000));
+    const completed = transition(started, { type: 'COMPLETE' }, d1, t0);
+    const rated = transition(completed, { type: 'RATE', score: 4 }, passenger, at(2_000));
+    expect(rated.timestamps.RATED).toBe(at(5_000).toISOString());
+    expect(Date.parse(toEvent(completed, rated).occurredAt)).toBeGreaterThanOrEqual(
+      Date.parse(toEvent(started, completed).occurredAt),
+    );
+  });
+
+  it('a skewed RATE is clamped to COMPLETED, not to the earlier START', () => {
+    const started = transition(makeTrip('DRIVER_ARRIVED'), { type: 'START' }, d1, at(5_000));
+    const completed = transition(started, { type: 'COMPLETE' }, d1, at(8_000));
+    const rated = transition(completed, { type: 'RATE', score: 4 }, passenger, at(6_000));
+    expect(rated.timestamps.RATED).toBe(at(8_000).toISOString());
+  });
+
+  it('a RATE after the completion keeps its own request clock', () => {
+    const started = transition(makeTrip('DRIVER_ARRIVED'), { type: 'START' }, d1, at(5_000));
+    const completed = transition(started, { type: 'COMPLETE' }, d1, t0);
+    const rated = transition(completed, { type: 'RATE', score: 4 }, passenger, at(7_000));
+    expect(rated.timestamps.RATED).toBe(at(7_000).toISOString());
+  });
+
+  it('DRIVER_ARRIVED is the latest stamp: completion is bounded by START only, not by ARRIVE', () => {
+    const inProgress = makeTrip('IN_PROGRESS', {
+      timestamps: {
+        ACCEPTED: t0.toISOString(),
+        DRIVER_ARRIVED: at(60_000).toISOString(),
+        IN_PROGRESS: at(5_000).toISOString(),
+      },
+    });
+    const completed = transition(inProgress, { type: 'COMPLETE' }, d1, t0);
+    expect(completed.timestamps.COMPLETED).toBe(at(5_000).toISOString());
+    // The ARRIVE stamp must not extend the rating window.
+    expectDomainError(
+      () => transition(completed, { type: 'RATE', score: 4 }, passenger, at(5_000 + DAY + 1)),
+      422,
+      'RATING_WINDOW_CLOSED',
+    );
+  });
+});
+
 describe('isActive', () => {
   it('is true exactly for the four active states', () => {
     const all: TripState[] = ['REQUESTED', 'ACCEPTED', 'DRIVER_ARRIVED', 'IN_PROGRESS', 'COMPLETED', 'RATED', 'CANCELLED'];

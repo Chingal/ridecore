@@ -110,6 +110,24 @@ function checkRating(trip: Trip, score: number, now: Date): 1 | 2 | 3 | 4 | 5 {
   return score as 1 | 2 | 3 | 4 | 5;
 }
 
+/** `now`, or `stamp` if that is later (a clock read before a racing write committed). */
+function notBefore(stamp: string | undefined, now: Date): Date {
+  const stampMs = stamp === undefined ? Number.NaN : Date.parse(stamp);
+  return stampMs > now.getTime() ? new Date(stampMs) : now;
+}
+
+/**
+ * Stamp for the applied transition. COMPLETE is clamped to the START stamp only (never to an
+ * ARRIVE/ACCEPT stamp, which would extend the rating window); RATE is clamped to the
+ * (possibly clamped) COMPLETED stamp so it never lands before it. The rating window itself is
+ * still checked with the request clock against COMPLETED.
+ */
+function transitionTime(trip: Trip, action: TripAction, now: Date): Date {
+  if (action.type === 'COMPLETE') return notBefore(trip.timestamps.IN_PROGRESS, now);
+  if (action.type === 'RATE') return notBefore(trip.timestamps.COMPLETED, now);
+  return now;
+}
+
 export function transition(trip: Trip, action: TripAction, actor: Actor, now: Date): Trip {
   checkActor(trip, action, actor);
 
@@ -118,11 +136,12 @@ export function transition(trip: Trip, action: TripAction, actor: Actor, now: Da
     throw new DomainError('INVALID_TRANSITION', 409, `Cannot ${action.type} a trip in state ${trip.state}`);
   }
 
+  const at = transitionTime(trip, action, now);
   const updated: Trip = {
     ...trip,
     state: next,
     version: trip.version + 1,
-    timestamps: { ...trip.timestamps, [next]: now.toISOString() },
+    timestamps: { ...trip.timestamps, [next]: at.toISOString() },
   };
 
   switch (action.type) {
