@@ -54,19 +54,20 @@ function checkRepo(repo: string): void {
   if (!isText(repo, REPO_RE)) throw new Error('invalid repository: expected owner/name');
 }
 
-function redact(message: string, secrets: Record<string, string>): string {
+function redact(message: string, ...secrets: Array<Record<string, string>>): string {
   // Longest first, so a secret that contains a shorter one is still replaced whole.
   // Each value also in its JSON-escaped form, which a tool may print for a multiline secret.
-  const values = Object.values(secrets).filter((v) => typeof v === 'string' && v !== '').flatMap((v) => [v, JSON.stringify(v).slice(1, -1)]);
+  const all = secrets.flatMap((s) => Object.values(s));
+  const values = all.filter((v) => typeof v === 'string' && v !== '').flatMap((v) => [v, JSON.stringify(v).slice(1, -1)]);
   return values.sort((a, b) => b.length - a.length).reduce((out, v) => out.split(v).join('***'), message);
 }
 
 /** Runs `fn` and rethrows any failure as a fresh Error with a redacted message and, on purpose,
  *  no `cause`: the original error still carries the raw message. */
 function redacting<T>(live: Record<string, string>, fn: () => Promise<T>): Promise<T> {
-  const secrets = { ...live }; // the values at the start of the call, even if the caller rotates them meanwhile
+  const initial = { ...live }; // a secret rotated during the call is redacted in both its old and new value
   return fn().catch((e: unknown) => {
-    throw new Error(redact(e instanceof Error ? e.message : String(e), secrets));
+    throw new Error(redact(e instanceof Error ? e.message : String(e), initial, live));
   });
 }
 
@@ -89,7 +90,7 @@ export function listFiled(repo: string, source: string, { gh, secrets }: GhConte
       // A number, an array, null or an error object has no integer `number`, so it is rejected here.
       const { number, body, pull_request } = Object(item) as { number?: unknown; body?: unknown; pull_request?: unknown };
       if (!Number.isSafeInteger(number)) throw new Error('gh api page item has no issue number');
-      if (body !== undefined && body !== null && typeof body !== 'string') throw new Error('gh api issue body is not a string');
+      if (body !== null && typeof body !== 'string') throw new Error('gh api issue body is missing or not a string');
       if (pull_request) continue;
       for (const m of (body ?? '').matchAll(MARKER_RE)) if (m[1] === source) found.add(m[2]!);
     }
@@ -139,15 +140,23 @@ export function batchId({ repo, labels, toFile }: { repo: string; labels: string
   return digest(repo, labels, freeze(toFile));
 }
 
-/** Escapes line breaks so a title always takes one preview line. */
-const oneLine = (s: string) => s.replace(/\\/g, '\\\\').replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+/** Shows control characters (a carriage return or an ANSI escape could hide text in a terminal) and
+ *  Unicode line separators as `\uXXXX`, so the reviewer sees exactly what will be posted. */
+const visible = (s: string, keep: string) =>
+  [...s].map((c) => {
+    const code = c.codePointAt(0)!;
+    const hidden = (code < 0x20 && !keep.includes(c)) || code === 0x7f || code === 0x2028 || code === 0x2029;
+    return hidden ? `\\u${code.toString(16).padStart(4, '0')}` : c;
+  }).join('');
+/** A title always takes one preview line. */
+const oneLine = (s: string) => visible(s.replace(/\\/g, '\\\\'), '');
 
 /** Prints (and returns) the preview: each kept finding in full, one line per skipped finding, the id and the command. */
 export function renderPreview(plan: Plan, { repo, labels, command }: { repo: string; labels: string[]; command: string }): string {
   const items = freeze(plan.toFile);
   const id = digest(repo, labels, items);
   const lines = [`${items.length} to file in ${repo} with labels ${labels.join(', ')}`];
-  for (const item of items) lines.push('', `### ${oneLine(item.title)}`, item.body);
+  for (const item of items) lines.push('', `### ${oneLine(item.title)}`, visible(item.body, '\n\t'));
   lines.push('');
   for (const f of plan.duplicates) lines.push(`duplicate: ${oneLine(f.title)}`);
   for (const f of plan.overflow) lines.push(`overflow: ${oneLine(f.title)}`);

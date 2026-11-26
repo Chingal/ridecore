@@ -60,6 +60,8 @@ describe('lists filed fingerprints across pages and sources', () => {
     ['a page item that is a number', '[[42]]'],
     ['a page item that is an array', '[[[]]]'],
     ['a body that is not a string', JSON.stringify([[{ number: 1, body: 42 }]])],
+    ['an issue without a body', '[[{"number":8}]]'],
+    ['an item without an issue number', '[[{"body":""}]]'],
   ])('throws on %s', async (_case, stdout, extra) => expect(filedVia(stdout, extra)).rejects.toThrow(/gh api/));
 });
 
@@ -108,7 +110,7 @@ describe('plans a batch without duplicates', () => {
 });
 
 it('preview shows what will be filed', () => {
-  const kept = [finding('Keep one'), finding('Keep two')];
+  const kept = [finding('Keep one'), finding('Keep\u2028two', ['keep-two'], 'shown\rhidden\n\u001b[2Kgone')];
   const p = { toFile: kept, duplicates: [finding('Already\nfiled')], overflow: [finding('Too\r\nmany\u2028here')] };
   const id = batchId({ repo: REPO, labels: LABELS, toFile: kept });
   const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -116,10 +118,11 @@ it('preview shows what will be filed', () => {
   expect(log.mock.calls).toEqual([[out]]);
   log.mockRestore();
 
-  for (const f of kept) expect(out).toContain(`### ${f.title}\n${final(f)}`);
+  expect(out).toContain(`### Keep one\n${final(kept[0]!)}`);
+  expect(out).toContain(`### Keep\\u2028two\nshown\\u000dhidden\n\\u001b[2Kgone\n\n${marker('glitchtip', 'keep-two')}`);
   const lines = out.split('\n');
-  expect(lines.filter((l) => /Already|filed$/.test(l))).toEqual(['duplicate: Already\\nfiled']);
-  expect(lines.filter((l) => /Too|many/.test(l))).toEqual(['overflow: Too\\r\\nmany\\u2028here']);
+  expect(lines.filter((l) => /Already|filed$/.test(l))).toEqual(['duplicate: Already\\u000afiled']);
+  expect(lines.filter((l) => /Too|many/.test(l))).toEqual(['overflow: Too\\u000d\\u000amany\\u2028here']);
   expect(lines.slice(-2)).toEqual([`batch id: ${id}`, `to file: make file-findings --confirm ${id}`]);
 });
 
@@ -188,7 +191,8 @@ it('diagnostics never show secrets', async () => {
     await failure(file(fakeGh({ stdout: url(1) }, echo).gh)),
     await failure(file(fakeGh(crash).gh)),
     await failure(file(fakeGh().gh, [finding('t', [MULTI])])), // an invalid fingerprint equal to a secret
-    await failure(listFiled(REPO, 'glitchtip', { gh: () => ((secrets.TOKEN = 'rotated'), { stdout: '', ...echo }), secrets })), // rotated mid-call (last)
+    // Rotated mid-call (last): both the old and the new value must be hidden.
+    await failure(listFiled(REPO, 'glitchtip', { gh: () => ((secrets.TOKEN = 'ghp_rotated'), { stdout: '', ...echo, stderr: `${echo.stderr} ghp_rotated` }), secrets })),
   ];
   for (const s of spies) s.mockRestore();
 
