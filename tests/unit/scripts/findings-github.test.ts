@@ -69,14 +69,14 @@ describe('plans a batch without duplicates', () => {
   it('drops filed and repeated findings, keeps order and caps the batch', () => {
     const findings = [
       finding('filed', ['old-1']),
-      finding('keep-a', ['new-1', 'new-5']),
-      finding('repeat-of-a', ['new-5']), // repeats keep-a's second fingerprint
+      finding('keep-z', ['new-1', 'new-5']), // not alphabetical, so sorting by title fails
+      finding('repeat-of-z', ['new-5']), // repeats keep-z's second fingerprint
       finding('mixed', ['new-2', 'old-1']), // one new, one filed: a duplicate, and new-2 stays free
       finding('keep-b', ['new-2']),
     ];
     const p = planBatch(findings, new Set(['old-1']));
-    expect(p.toFile.map((f) => f.title)).toEqual(['keep-a', 'keep-b']);
-    expect(p.duplicates.map((f) => f.title)).toEqual(['filed', 'repeat-of-a', 'mixed']);
+    expect(p.toFile.map((f) => f.title)).toEqual(['keep-z', 'keep-b']);
+    expect(p.duplicates.map((f) => f.title)).toEqual(['filed', 'repeat-of-z', 'mixed']);
     expect(p.overflow).toEqual([]);
 
     const many = Array.from({ length: 12 }, (_, i) => finding(`k${i}`));
@@ -129,7 +129,8 @@ it('preview shows what will be filed', () => {
 describe('files only the confirmed batch', () => {
   const three = () => [finding('first', ['fp-1', 'fp-1b']), finding('second'), finding('third')];
   const run = (toFile: Finding[], gh: ReturnType<typeof fakeGh>['gh'], labels = LABELS, confirm = batchId({ repo: REPO, labels, toFile })) =>
-    fileBatch({ toFile, duplicates: [], overflow: [] }, { repo: REPO, labels, confirm, gh, secrets: {} });
+    // Non-empty skipped lists: filing a duplicate or an overflow finding must fail this group.
+    fileBatch({ toFile, duplicates: [finding('dup')], overflow: [finding('over')] }, { repo: REPO, labels, confirm, gh, secrets: {} });
 
   it('refuses a wrong id or a missing source label, then files one issue per finding', async () => {
     const refused = fakeGh({ stdout: url(1) });
@@ -173,7 +174,7 @@ it('diagnostics never show secrets', async () => {
   const TOKEN = 'ghp_secretvalue123';
   const MULTI = 'line-one\nline-two-secret';
   const secrets: Record<string, string> = { PART: 'secretvalue', TOKEN, MULTI, EMPTY: '' }; // PART inside TOKEN: longest must go first
-  const toFile = [finding('t'), finding(`title ${TOKEN}`)];
+  const toFile = [finding('t'), finding('second')];
   const labels = ['source:glitchtip'];
   const confirm = batchId({ repo: REPO, labels, toFile });
   const echo = { code: 1, stderr: `denied for ${TOKEN} and ${MULTI} and ${JSON.stringify(MULTI)}` };

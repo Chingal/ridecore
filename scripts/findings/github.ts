@@ -98,7 +98,8 @@ export function listFiled(repo: string, source: string, { gh, secrets }: GhConte
   });
 }
 
-/** Keeps input order. Throws on a finding without fingerprints (it could never be deduplicated) or a cap that is not an integer >= 0. */
+/** Keeps input order. One source per batch: `filed` holds bare fingerprints. Throws on a finding without
+ *  fingerprints (it could never be deduplicated) or a cap that is not an integer >= 0. */
 export function planBatch(findings: Finding[], filed: Set<string>, max = 10): Plan {
   if (!Number.isSafeInteger(max) || max < 0) throw new Error('max must be a non-negative integer');
   const seen = new Set(filed);
@@ -140,8 +141,8 @@ export function batchId({ repo, labels, toFile }: { repo: string; labels: string
   return digest(repo, labels, freeze(toFile));
 }
 
-/** Shows control characters (a carriage return or an ANSI escape could hide text in a terminal) and
- *  Unicode line separators as `\uXXXX`, so the reviewer sees exactly what will be posted. */
+/** Shows C0 control characters (a carriage return or an ANSI escape could hide text in a terminal), DEL
+ *  and U+2028/U+2029 as `\uXXXX`. Other invisible characters (U+0085, U+200B, U+202E...) print raw. */
 const visible = (s: string, keep: string) =>
   [...s].map((c) => {
     const code = c.codePointAt(0)!;
