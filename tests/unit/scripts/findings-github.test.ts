@@ -20,14 +20,14 @@ function fakeGh(...replies: Reply[]) {
 
 const finding = (title: string, fingerprints = [title.toLowerCase().replace(/[^a-z0-9]+/g, '-')], body = `body of ${title}`): Finding => ({ source: 'glitchtip', title, body, fingerprints });
 const final = (f: Finding) => `${f.body}\n\n${f.fingerprints.map((fp) => marker(f.source, fp)).join('\n')}`;
-const slurp = (...pages: unknown[][]) => JSON.stringify(pages);
+const slurp = (...pages: object[][]) => JSON.stringify(pages.map((page) => page.map((item, i) => ({ number: i + 1, ...item }))));
 const failure = (run: Promise<unknown>) => run.then(() => expect.unreachable('expected a rejection'), (e: unknown) => e as Error);
 const filedVia = (stdout: string, extra: Partial<GhResult> = {}) => listFiled(REPO, 'glitchtip', { gh: fakeGh({ stdout, ...extra }).gh, secrets: {} });
 
 describe('lists filed fingerprints across pages and sources', () => {
   it('reads every page, open and closed, of this source only', async () => {
     const pageOne = [
-      { body: `open\n${marker('glitchtip', 'match-1')}` },
+      { body: `open\n${marker('glitchtip', 'match-1')}\n${marker('glitchtip', 'second-fp')}` },
       { body: null },
       { body: marker('glitchtip', 'from-a-pr'), pull_request: { url: 'x' } },
       { body: `${marker('sonarqube', 'other-source')} ${marker('glitchtip-staging', 'prefix-source')}` },
@@ -36,7 +36,7 @@ describe('lists filed fingerprints across pages and sources', () => {
     const { gh, calls } = fakeGh({ stdout: slurp(pageOne, pageTwo) });
     const filed = await listFiled(REPO, 'glitchtip', { gh, secrets: {} });
     expect(calls.map((c) => c.argv)).toEqual([['api', '--paginate', '--slurp', 'repos/owner/repo/issues?state=all&per_page=100']]);
-    expect([...filed].sort()).toEqual(['match-1', 'match-2']);
+    expect([...filed].sort()).toEqual(['match-1', 'match-2', 'second-fp']);
     expect(marker('glitchtip', 'a:b.c_d-1')).toBe('<!-- finding: glitchtip:a:b.c_d-1 -->');
   });
 
@@ -55,10 +55,11 @@ describe('lists filed fingerprints across pages and sources', () => {
   it.each<[string, string, Partial<GhResult>?]>([
     ['a failing gh, even with valid JSON', slurp([]), { code: 1, stderr: 'boom' }],
     ['output that is not JSON', 'not json'],
-    ['an array of issues, not of pages', JSON.stringify([{ body: '' }])],
+    ['an array of issues, not of pages', JSON.stringify([{ number: 1, body: '' }])],
+    ['an error object in place of an issue', '[[{"message":"lookup failed"}]]'],
     ['a page item that is a number', '[[42]]'],
     ['a page item that is an array', '[[[]]]'],
-    ['a body that is not a string', JSON.stringify([[{ body: 42 }]])],
+    ['a body that is not a string', JSON.stringify([[{ number: 1, body: 42 }]])],
   ])('throws on %s', async (_case, stdout, extra) => expect(filedVia(stdout, extra)).rejects.toThrow(/gh api/));
 });
 
@@ -66,8 +67,8 @@ describe('plans a batch without duplicates', () => {
   it('drops filed and repeated findings, keeps order and caps the batch', () => {
     const findings = [
       finding('filed', ['old-1']),
-      finding('keep-a', ['new-1']),
-      finding('repeat-of-a', ['new-1']),
+      finding('keep-a', ['new-1', 'new-5']),
+      finding('repeat-of-a', ['new-5']), // repeats keep-a's second fingerprint
       finding('mixed', ['new-2', 'old-1']), // one new, one filed: a duplicate, and new-2 stays free
       finding('keep-b', ['new-2']),
     ];
@@ -80,6 +81,7 @@ describe('plans a batch without duplicates', () => {
     expect(planBatch(many, new Set()).overflow.map((f) => f.title)).toEqual(['k10', 'k11']); // default cap is 10
     const capped = planBatch([finding('dup', ['old-1']), ...many.slice(0, 3)], new Set(['old-1']), 2);
     expect([capped.toFile, capped.duplicates, capped.overflow].map((l) => l.map((f) => f.title))).toEqual([['k0', 'k1'], ['dup'], ['k2']]);
+    expect(planBatch(many.slice(0, 1), new Set(), 0).overflow).toHaveLength(1); // a cap of 0 keeps none
   });
 
   const base = { repo: REPO, labels: LABELS, toFile: [finding('a', ['fp-a'], 'body-a')] };
@@ -96,8 +98,8 @@ describe('plans a batch without duplicates', () => {
     ['a fingerprint', { ...base, toFile: [finding('a', ['fp-z'], 'body-a')] }],
   ])('changes the batch id with %s', (_case, input) => expect(batchId(input)).not.toBe(batchId(base)));
 
-  it.each([1.5, 0, -1, Infinity, Number.NaN, '3' as unknown as number])('rejects the cap %s', (max) =>
-    expect(() => planBatch([finding('a')], new Set(), max)).toThrow(/positive integer/));
+  it.each([1.5, -1, Infinity, Number.NaN, '3' as unknown as number])('rejects the cap %s', (max) =>
+    expect(() => planBatch([finding('a')], new Set(), max)).toThrow(/non-negative integer/));
 
   it.each<[string, Finding]>([
     ['no fingerprint', finding('a', [])],
@@ -107,7 +109,7 @@ describe('plans a batch without duplicates', () => {
 
 it('preview shows what will be filed', () => {
   const kept = [finding('Keep one'), finding('Keep two')];
-  const p = { toFile: kept, duplicates: [finding('Already\nfiled')], overflow: [finding('Too\r\nmany')] };
+  const p = { toFile: kept, duplicates: [finding('Already\nfiled')], overflow: [finding('Too\r\nmany\u2028here')] };
   const id = batchId({ repo: REPO, labels: LABELS, toFile: kept });
   const log = vi.spyOn(console, 'log').mockImplementation(() => {});
   const out = renderPreview(p, { repo: REPO, labels: LABELS, command: 'make file-findings' });
@@ -117,12 +119,12 @@ it('preview shows what will be filed', () => {
   for (const f of kept) expect(out).toContain(`### ${f.title}\n${final(f)}`);
   const lines = out.split('\n');
   expect(lines.filter((l) => /Already|filed$/.test(l))).toEqual(['duplicate: Already\\nfiled']);
-  expect(lines.filter((l) => /Too|many/.test(l))).toEqual(['overflow: Too\\r\\nmany']);
+  expect(lines.filter((l) => /Too|many/.test(l))).toEqual(['overflow: Too\\r\\nmany\\u2028here']);
   expect(lines.slice(-2)).toEqual([`batch id: ${id}`, `to file: make file-findings --confirm ${id}`]);
 });
 
 describe('files only the confirmed batch', () => {
-  const three = () => [finding('first'), finding('second'), finding('third')];
+  const three = () => [finding('first', ['fp-1', 'fp-1b']), finding('second'), finding('third')];
   const run = (toFile: Finding[], gh: ReturnType<typeof fakeGh>['gh'], labels = LABELS, confirm = batchId({ repo: REPO, labels, toFile })) =>
     fileBatch({ toFile, duplicates: [], overflow: [] }, { repo: REPO, labels, confirm, gh, secrets: {} });
 
@@ -153,7 +155,7 @@ describe('files only the confirmed batch', () => {
   });
 
   it.each<[string, Reply]>([
-    ['a non-zero exit', { code: 1, stderr: 'create failed' }],
+    ['a non-zero exit', { code: 1, stdout: url(2), stderr: 'create failed' }],
     ['a thrown runner', () => { throw new Error('spawn failed'); }],
     ['output that is not an issue URL', { stdout: '' }],
   ])('stops at the first failure (%s) and reports the URLs created so far', async (_case, second) => {
@@ -167,11 +169,11 @@ describe('files only the confirmed batch', () => {
 it('diagnostics never show secrets', async () => {
   const TOKEN = 'ghp_secretvalue123';
   const MULTI = 'line-one\nline-two-secret';
-  const secrets = { PART: 'secretvalue', TOKEN, MULTI, EMPTY: '' }; // PART inside TOKEN: longest must go first
+  const secrets: Record<string, string> = { PART: 'secretvalue', TOKEN, MULTI, EMPTY: '' }; // PART inside TOKEN: longest must go first
   const toFile = [finding('t'), finding(`title ${TOKEN}`)];
   const labels = ['source:glitchtip'];
   const confirm = batchId({ repo: REPO, labels, toFile });
-  const echo = { code: 1, stderr: `denied for ${TOKEN} and ${MULTI}` };
+  const echo = { code: 1, stderr: `denied for ${TOKEN} and ${MULTI} and ${JSON.stringify(MULTI)}` };
   const crash = () => { throw new Error(`crashed with ${TOKEN} ${MULTI}`); };
   const file = (gh: ReturnType<typeof fakeGh>['gh'], items = toFile) => fileBatch({ toFile: items, duplicates: [], overflow: [] }, { repo: REPO, labels, confirm, gh, secrets });
   const printed: string[] = [];
@@ -186,6 +188,7 @@ it('diagnostics never show secrets', async () => {
     await failure(file(fakeGh({ stdout: url(1) }, echo).gh)),
     await failure(file(fakeGh(crash).gh)),
     await failure(file(fakeGh().gh, [finding('t', [MULTI])])), // an invalid fingerprint equal to a secret
+    await failure(listFiled(REPO, 'glitchtip', { gh: () => ((secrets.TOKEN = 'rotated'), { stdout: '', ...echo }), secrets })), // rotated mid-call (last)
   ];
   for (const s of spies) s.mockRestore();
 

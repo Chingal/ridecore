@@ -56,13 +56,15 @@ function checkRepo(repo: string): void {
 
 function redact(message: string, secrets: Record<string, string>): string {
   // Longest first, so a secret that contains a shorter one is still replaced whole.
-  const values = Object.values(secrets).filter((v) => typeof v === 'string' && v !== '');
+  // Each value also in its JSON-escaped form, which a tool may print for a multiline secret.
+  const values = Object.values(secrets).filter((v) => typeof v === 'string' && v !== '').flatMap((v) => [v, JSON.stringify(v).slice(1, -1)]);
   return values.sort((a, b) => b.length - a.length).reduce((out, v) => out.split(v).join('***'), message);
 }
 
 /** Runs `fn` and rethrows any failure as a fresh Error with a redacted message and, on purpose,
  *  no `cause`: the original error still carries the raw message. */
-function redacting<T>(secrets: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+function redacting<T>(live: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const secrets = { ...live }; // the values at the start of the call, even if the caller rotates them meanwhile
   return fn().catch((e: unknown) => {
     throw new Error(redact(e instanceof Error ? e.message : String(e), secrets));
   });
@@ -84,8 +86,9 @@ export function listFiled(repo: string, source: string, { gh, secrets }: GhConte
     if (!Array.isArray(pages) || !pages.every(Array.isArray)) throw new Error('gh api output is not an array of pages');
     const found = new Set<string>();
     for (const item of (pages as unknown[][]).flat()) {
-      if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error('gh api page item is not an issue');
-      const { body, pull_request } = item as { body?: unknown; pull_request?: unknown };
+      // A number, an array, null or an error object has no integer `number`, so it is rejected here.
+      const { number, body, pull_request } = Object(item) as { number?: unknown; body?: unknown; pull_request?: unknown };
+      if (!Number.isSafeInteger(number)) throw new Error('gh api page item has no issue number');
       if (body !== undefined && body !== null && typeof body !== 'string') throw new Error('gh api issue body is not a string');
       if (pull_request) continue;
       for (const m of (body ?? '').matchAll(MARKER_RE)) if (m[1] === source) found.add(m[2]!);
@@ -94,9 +97,9 @@ export function listFiled(repo: string, source: string, { gh, secrets }: GhConte
   });
 }
 
-/** Keeps input order. Throws on a finding without fingerprints (it could never be deduplicated) or a bad cap. */
+/** Keeps input order. Throws on a finding without fingerprints (it could never be deduplicated) or a cap that is not an integer >= 0. */
 export function planBatch(findings: Finding[], filed: Set<string>, max = 10): Plan {
-  if (!Number.isSafeInteger(max) || max < 1) throw new Error('max must be a positive integer');
+  if (!Number.isSafeInteger(max) || max < 0) throw new Error('max must be a non-negative integer');
   const seen = new Set(filed);
   const plan: Plan = { toFile: [], duplicates: [], overflow: [] };
   for (const f of findings) {
@@ -137,7 +140,7 @@ export function batchId({ repo, labels, toFile }: { repo: string; labels: string
 }
 
 /** Escapes line breaks so a title always takes one preview line. */
-const oneLine = (s: string) => s.replace(/\\/g, '\\\\').replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/[\u2028\u2029]/g, ' ');
+const oneLine = (s: string) => s.replace(/\\/g, '\\\\').replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 
 /** Prints (and returns) the preview: each kept finding in full, one line per skipped finding, the id and the command. */
 export function renderPreview(plan: Plan, { repo, labels, command }: { repo: string; labels: string[]; command: string }): string {
