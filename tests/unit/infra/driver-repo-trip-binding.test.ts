@@ -246,11 +246,11 @@ describe('DriverRepo trip binding', () => {
     if (tripPos) expect(after.tripPosition).toEqual(B);
     else expect(after.tripPosition).toBeUndefined();
     expect(after.tripId).toBe(stored.tripId);
-    // Only while the trip read is the stored one: trip t1 released and t2 accepted in between fails it.
+    // Only while the trip read is the stored one: t1 released and t2 accepted in between fails it, and then it re-reads.
     if (tripPos) expect(evalWrite({ ...stored, tripId: 't2' }, writeInput(sent)).holds).toBe(false);
-    // ...and then re-reads: the retry is bound to t2 instead of failing with 409.
     const race = stubRepo({ ...stored }, { tripId: 't2' });
     if (tripPos) await expect(race.repo.setPosition('d1', B, withCommit ? commit : undefined)).resolves.toMatchObject({ position: B });
+    if (tripPos) expect([evalWrite(stored, writeInput(race.sent.slice(-1))).holds, evalWrite({ ...stored, tripId: 't2' }, writeInput(race.sent.slice(-1))).after.tripPosition]).toEqual([false, B]);
   });
 
   // Criterion 5 (each method and the commit callback; setAvailability without commit returns ALL_NEW).
