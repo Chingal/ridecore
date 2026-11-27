@@ -53,7 +53,8 @@ function stubRepo(stored: Record<string, unknown>) {
   const sent: unknown[] = [];
   const send = vi.fn(async (cmd: unknown) => {
     sent.push(cmd);
-    if (cmd instanceof GetCommand) return { Item: structuredClone(stored) };
+    const key = (cmd as { input: { Key?: Record<string, unknown> } }).input.Key;
+    if (cmd instanceof GetCommand) return key?.PK === stored.PK && key?.SK === stored.SK ? { Item: structuredClone(stored) } : {};
     if (cmd instanceof UpdateCommand) {
       const u = cmd.input as Update;
       if (!evalWrite(stored, u).holds) throw new ConditionalCheckFailedException({ message: 'failed', $metadata: {} });
@@ -225,6 +226,10 @@ describe('DriverRepo trip binding', () => {
     const writes = sent.filter((c) => !(c instanceof GetCommand));
     expect(writes.map((c) => c instanceof TransactWriteCommand)).toEqual([withCommit]);
     expect(seen() !== undefined).toBe(withCommit);
+    if (withCommit) expect((writes[0] as TransactWriteCommand).input.TransactItems?.[1]?.Put?.Item?.PK).toBe('IDEM#test');
+    // Still conditioned on the availability read (an accept or release in between fails it).
+    const other = availability === 'AVAILABLE' ? 'ON_TRIP' : 'AVAILABLE';
+    expect(evalWrite({ ...stored, availability: other }, writeInput(sent)).holds).toBe(false);
 
     // position and geohash5 land on B (the written point), not the one read (A).
     expect(after.position).toEqual(B);
@@ -240,6 +245,7 @@ describe('DriverRepo trip binding', () => {
     // The trip position, when written, is the written point too (not the one read).
     if (tripPos) expect(after.tripPosition).toEqual(B);
     else expect(after.tripPosition).toBeUndefined();
+    expect(after.tripId).toBe(stored.tripId);
     // Only while the trip read is the stored one: trip t1 released and t2 accepted in between fails it.
     if (tripPos) expect(evalWrite({ ...stored, tripId: 't2' }, writeInput(sent)).holds).toBe(false);
   });
