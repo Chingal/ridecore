@@ -153,7 +153,7 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo; nea
           toEvent(before, after),
           [
             ...drivers.retireOfferItems(tripId, offers.driverIds, driver.id),
-            drivers.takeTripItem(driver.id),
+            drivers.takeTripItem(driver.id, tripId),
             ...resultItems(commit, after),
           ],
           { offerSeq: offers.seq },
@@ -174,7 +174,7 @@ export function createDispatch(deps: { trips: TripRepo; drivers: DriverRepo; nea
         // CANCEL from REQUESTED: the offers read at this offerSeq leave the offer index, guarded on it.
         const fromRequested = before.state === 'REQUESTED';
         const retire = fromRequested ? drivers.retireOfferItems(tripId, offers.driverIds) : [];
-        const release = after.driverId === undefined ? [] : await drivers.releaseItems(after.driverId);
+        const release = after.driverId === undefined ? [] : await drivers.releaseItems(after.driverId, tripId);
         await trips.save(
           before,
           after,

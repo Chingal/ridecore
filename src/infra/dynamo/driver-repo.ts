@@ -311,16 +311,17 @@ export class DriverRepo {
    * Accept-transaction item: AVAILABLE -> ON_TRIP and out of the availability index. The condition
    * lives on the update itself (a transaction cannot touch the same item twice).
    */
-  takeTripItem(driverId: string): ExtraItem {
+  takeTripItem(driverId: string, tripId: string): ExtraItem {
     return {
       item: {
         Update: {
           TableName: this.tableName,
           Key: driverKey(driverId),
-          UpdateExpression: 'SET #availability = :onTrip REMOVE GSI2PK, GSI2SK',
+          // Name the trip the driver is on; `tripPosition` reappears with the next position write on it.
+          UpdateExpression: 'SET #availability = :onTrip, tripId = :tripId REMOVE GSI2PK, GSI2SK, tripPosition',
           ConditionExpression: '#availability = :available',
           ExpressionAttributeNames: { '#availability': 'availability' },
-          ExpressionAttributeValues: { ':onTrip': 'ON_TRIP', ':available': 'AVAILABLE' },
+          ExpressionAttributeValues: { ':onTrip': 'ON_TRIP', ':available': 'AVAILABLE', ':tripId': tripId },
         },
       },
       onConditionFailed: new DomainError('DRIVER_NOT_AVAILABLE', 409, 'The driver is not available'),
@@ -331,9 +332,12 @@ export class DriverRepo {
    * Item that returns the driver to AVAILABLE when its trip completes or is cancelled, back in the
    * availability index only if it has a position. Reads the driver to know its cell; the update is
    * conditioned on that cell so a concurrent `setPosition` makes the transaction fail with 409
-   * CONCURRENT_UPDATE instead of indexing a stale cell. Returns [] for a driver without a META item.
+   * CONCURRENT_UPDATE instead of indexing a stale cell. The update is also conditioned on the stored
+   * `tripId` being `tripId`, and clears the trip binding (`tripId`, `tripPosition`): a late or mistaken
+   * release of another trip (or of a driver with no `tripId`) fails with 409 CONCURRENT_UPDATE.
+   * Returns [] for a driver without a META item.
    */
-  async releaseItems(driverId: string): Promise<ExtraItem[]> {
+  async releaseItems(driverId: string, tripId: string): Promise<ExtraItem[]> {
     const current = await this.get(driverId);
     if (current === null) return [];
     const gh = current.geohash5;
@@ -346,12 +350,13 @@ export class DriverRepo {
             Key: driverKey(driverId),
             UpdateExpression:
               gh === undefined
-                ? 'SET #availability = :available'
-                : 'SET #availability = :available, GSI2PK = :gsi2pk, GSI2SK = :gsi2sk',
-            ConditionExpression: `attribute_exists(PK) AND ${cellCondition}`,
+                ? 'SET #availability = :available REMOVE tripId, tripPosition'
+                : 'SET #availability = :available, GSI2PK = :gsi2pk, GSI2SK = :gsi2sk REMOVE tripId, tripPosition',
+            ConditionExpression: `attribute_exists(PK) AND tripId = :tripId AND ${cellCondition}`,
             ExpressionAttributeNames: { '#availability': 'availability' },
             ExpressionAttributeValues: {
               ':available': 'AVAILABLE',
+              ':tripId': tripId,
               ...(gh === undefined ? {} : { ':gh': gh, ...gsi2Values(gh, driverId) }),
             },
           },
@@ -420,6 +425,12 @@ export class DriverRepo {
         set.push('#position = :position', 'geohash5 = :newGh');
         values[':position'] = target.position;
         values[':newGh'] = target.geohash5;
+        // A position recorded during a trip is also stored as the trip's position, so a late record
+        // can later be bound to the trip it belongs to. It never leaves the repository (see toDriver).
+        if (target.availability === 'ON_TRIP') {
+          set.push('tripPosition = :tripPosition');
+          values[':tripPosition'] = target.position;
+        }
       }
       if (indexed && target.geohash5 !== undefined) {
         set.push('GSI2PK = :gsi2pk', 'GSI2SK = :gsi2sk');
@@ -496,8 +507,11 @@ function gsi2Values(geohash5: string, driverId: string): Record<string, string> 
   return { ':gsi2pk': keys.GSI2PK, ':gsi2sk': keys.GSI2SK };
 }
 
+/** Dispatch bookkeeping kept on a driver item while it is on a trip; never part of the domain Driver. */
+const TRIP_BINDING_ATTRIBUTES: readonly string[] = ['tripId', 'tripPosition'];
+
 function toDriver(item: Record<string, unknown>): Driver {
   const driver: Record<string, unknown> = { ...item };
-  for (const key of KEY_ATTRIBUTES) delete driver[key];
+  for (const key of [...KEY_ATTRIBUTES, ...TRIP_BINDING_ATTRIBUTES]) delete driver[key];
   return driver as unknown as Driver;
 }
