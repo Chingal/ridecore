@@ -8,8 +8,7 @@ import { driverGsi2 } from '../../../src/infra/dynamo/keys.ts';
 import type { ExtraItem } from '../../../src/infra/dynamo/transact.ts';
 
 const A: LatLng = { lat: 2.4448, lng: -76.6147 };
-// A second point in a different cell, so an implementation that stores the position it read (A)
-// instead of the one being written (B) is caught (review-checklist C17).
+// In another cell, so storing the position read (A) instead of the one written (B) is caught (C17).
 const B: LatLng = { lat: 3.4516, lng: -76.532 };
 
 type Update = {
@@ -49,12 +48,14 @@ const driverRow = (o: RowOverrides): Record<string, unknown> => {
 };
 
 /** A DynamoDB stub: records the commands and evaluates each write against the stored row (offline). */
-function stubRepo(stored: Record<string, unknown>) {
+function stubRepo(stored: Record<string, unknown>, afterRead: Record<string, unknown> = {}) {
   const sent: unknown[] = [];
   const send = vi.fn(async (cmd: unknown) => {
     sent.push(cmd);
     const key = (cmd as { input: { Key?: Record<string, unknown> } }).input.Key;
-    if (cmd instanceof GetCommand) return key?.PK === stored.PK && key?.SK === stored.SK ? { Item: structuredClone(stored) } : {};
+    const item = key?.PK === stored.PK && key?.SK === stored.SK ? structuredClone(stored) : undefined;
+    Object.assign(stored, afterRead); // a change landing between the first read and the write
+    if (cmd instanceof GetCommand) return { Item: item };
     if (cmd instanceof UpdateCommand) {
       const u = cmd.input as Update;
       if (!evalWrite(stored, u).holds) throw new ConditionalCheckFailedException({ message: 'failed', $metadata: {} });
@@ -219,14 +220,15 @@ describe('DriverRepo trip binding', () => {
     const stored = driverRow({ availability, position: A, geohash5: cellOf(A), ...(tripPos ? { tripId: 't1' } : {}) });
     const { repo, sent } = stubRepo(stored);
     const { commit, seen } = captureCommit();
-    await repo.setPosition('d1', B, withCommit ? commit : undefined);
+    const result = await repo.setPosition('d1', B, withCommit ? commit : undefined);
     const { holds: ok, after } = evalWrite(stored, writeInput(sent));
+    for (const view of withCommit ? [result, seen()] : [result]) expect(view).toMatchObject({ position: B, geohash5: cellOf(B) });
     expect(ok).toBe(true);
     // With `commit` the write is one transaction (with the commit item) and no standalone update.
     const writes = sent.filter((c) => !(c instanceof GetCommand));
     expect(writes.map((c) => c instanceof TransactWriteCommand)).toEqual([withCommit]);
     expect(seen() !== undefined).toBe(withCommit);
-    if (withCommit) expect((writes[0] as TransactWriteCommand).input.TransactItems?.[1]?.Put?.Item?.PK).toBe('IDEM#test');
+    if (withCommit) expect((writes[0] as TransactWriteCommand).input.TransactItems?.[1]?.Put?.Item?.body).toEqual(seen());
     // Still conditioned on the availability read (an accept or release in between fails it).
     const other = availability === 'AVAILABLE' ? 'ON_TRIP' : 'AVAILABLE';
     expect(evalWrite({ ...stored, availability: other }, writeInput(sent)).holds).toBe(false);
@@ -235,24 +237,23 @@ describe('DriverRepo trip binding', () => {
     expect(after.position).toEqual(B);
     expect(after.geohash5).toBe(cellOf(B));
     if (availability === 'AVAILABLE') {
-      // Moving A -> B indexes the driver in B's cell, not the one it was read from (A).
       expect(after.GSI2PK).toBe(driverGsi2(cellOf(B), 'd1').GSI2PK);
       expect(after.GSI2SK).toBe(driverGsi2(cellOf(B), 'd1').GSI2SK);
     } else {
       expect(after.GSI2PK).toBeUndefined();
       expect(after.GSI2SK).toBeUndefined();
     }
-    // The trip position, when written, is the written point too (not the one read).
     if (tripPos) expect(after.tripPosition).toEqual(B);
     else expect(after.tripPosition).toBeUndefined();
     expect(after.tripId).toBe(stored.tripId);
     // Only while the trip read is the stored one: trip t1 released and t2 accepted in between fails it.
     if (tripPos) expect(evalWrite({ ...stored, tripId: 't2' }, writeInput(sent)).holds).toBe(false);
+    // ...and then re-reads: the retry is bound to t2 instead of failing with 409.
+    const race = stubRepo({ ...stored }, { tripId: 't2' });
+    if (tripPos) await expect(race.repo.setPosition('d1', B, withCommit ? commit : undefined)).resolves.toMatchObject({ position: B });
   });
 
-  // Criterion 5 (a stored row with both attributes, read through each method and the commit callback).
-  // `setAvailability` without a commit is the only path that returns `toDriver(ALL_NEW)` rather than
-  // the computed view, so it is covered on its own (a repo that cleaned only `get` would pass otherwise).
+  // Criterion 5 (each method and the commit callback; setAvailability without commit returns ALL_NEW).
   it.each([
     { method: 'get' as const, availability: 'ON_TRIP' as const, withCommit: false },
     { method: 'setPosition' as const, availability: 'ON_TRIP' as const, withCommit: false },
