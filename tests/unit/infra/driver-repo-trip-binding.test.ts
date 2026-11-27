@@ -21,29 +21,6 @@ type Update = {
   ReturnValues?: string;
 };
 
-/**
- * Evaluates the subset of DynamoDB condition syntax the repo uses (`AND` of `attribute_exists`,
- * `attribute_not_exists` and `path = :value`, with `#name` placeholders and dotted map paths),
- * exactly as `holds` does in tests/unit/infra/driver-repo-availability.test.ts.
- */
-function holds(row: Record<string, unknown>, u: Update): boolean {
-  const names = u.ExpressionAttributeNames ?? {};
-  const values = u.ExpressionAttributeValues ?? {};
-  const resolve = (path: string): unknown =>
-    path.split('.').reduce<unknown>((obj, part) => {
-      const key = part.startsWith('#') ? names[part] : part;
-      if (key === undefined) throw new Error(`undefined name ${part}`);
-      return obj === undefined || obj === null ? undefined : (obj as Record<string, unknown>)[key];
-    }, row);
-  return (u.ConditionExpression ?? '').split(' AND ').every((clause) => {
-    const fn = /^attribute_(not_)?exists\((.+)\)$/.exec(clause.trim());
-    if (fn) return (resolve(fn[2] as string) === undefined) === (fn[1] !== undefined);
-    const [left, right] = clause.split(' = ').map((s) => s.trim());
-    if (left === undefined || right === undefined || !(right in values)) throw new Error(`unsupported clause ${clause}`);
-    return resolve(left) === values[right];
-  });
-}
-
 type RowOverrides = {
   availability?: Driver['availability'];
   position?: LatLng;
@@ -52,11 +29,7 @@ type RowOverrides = {
   tripPosition?: LatLng;
 };
 
-/**
- * Builds the stored `DRIVER#d1 / META` row; only the overrides given are present. An AVAILABLE
- * driver with a cell also carries the sparse GSI2 keys, as production does, so a write that removes
- * or moves them is observed against a row that has them.
- */
+/** The stored `DRIVER#d1 / META` row with only the overrides given (and GSI2 keys when AVAILABLE in a cell). */
 const driverRow = (o: RowOverrides): Record<string, unknown> => {
   const availability = o.availability ?? 'ON_TRIP';
   return {
@@ -75,10 +48,7 @@ const driverRow = (o: RowOverrides): Record<string, unknown> => {
   };
 };
 
-/**
- * A DynamoDB stub that records the commands sent and evaluates each write's real ConditionExpression
- * against the single stored row (nothing touches Docker, Floci or the network).
- */
+/** A DynamoDB stub: records the commands and evaluates each write against the stored row (offline). */
 function stubRepo(stored: Record<string, unknown>) {
   const sent: unknown[] = [];
   const send = vi.fn(async (cmd: unknown) => {
@@ -86,13 +56,12 @@ function stubRepo(stored: Record<string, unknown>) {
     if (cmd instanceof GetCommand) return { Item: structuredClone(stored) };
     if (cmd instanceof UpdateCommand) {
       const u = cmd.input as Update;
-      if (!holds(stored, u)) throw new ConditionalCheckFailedException({ message: 'failed', $metadata: {} });
+      if (!evalWrite(stored, u).holds) throw new ConditionalCheckFailedException({ message: 'failed', $metadata: {} });
       return u.ReturnValues === 'ALL_NEW' ? { Attributes: structuredClone(stored) } : {};
     }
     if (cmd instanceof TransactWriteCommand) {
       const items = cmd.input.TransactItems ?? [];
-      const u = items[0]?.Update as Update;
-      if (!holds(stored, u)) {
+      if (!evalWrite(stored, items[0]?.Update as Update).holds) {
         throw new TransactionCanceledException({
           message: 'cancelled',
           $metadata: {},
@@ -110,30 +79,38 @@ const asUpdate = (extra: ExtraItem): Update => (extra as { item: { Update: Updat
 const onFail = (extra: ExtraItem): DomainError => (extra as { onConditionFailed: DomainError }).onConditionFailed;
 
 /**
- * Evaluates a write the way DynamoDB would, so a wrong key, attribute name or value changes the
- * observed result, not just the expression text (review-checklist C17): resolves the row the update
- * targets by its `Key` (a key other than the stored one means no row, as if absent), checks the
- * `ConditionExpression` against it, and applies `SET`/`REMOVE` resolving `#name`/`:value` tokens
- * (throwing on an unknown placeholder, so a mutation leaning on one cannot slip through).
+ * Evaluates a write the way DynamoDB would, so a wrong key, name or value changes the observed result
+ * (review-checklist C17): resolves the row by `Key` (another key means no row), checks the condition
+ * (`AND` of `attribute_(not_)exists` and `path = :value`, as `holds` does in
+ * tests/unit/infra/driver-repo-availability.test.ts) and applies `SET`/`REMOVE`.
  */
 function evalWrite(stored: Record<string, unknown>, u: Update): { holds: boolean; after: Record<string, unknown> } {
   const names = u.ExpressionAttributeNames ?? {};
   const values = u.ExpressionAttributeValues ?? {};
-  const resolveName = (token: string): string => {
+  const name = (token: string): string => {
     const key = token.startsWith('#') ? names[token] : token;
     if (key === undefined) throw new Error(`undefined name ${token}`);
     return key;
   };
-  const target = u.Key?.PK === stored.PK && u.Key?.SK === stored.SK ? stored : {};
-  const after = structuredClone(target);
+  const row = u.Key?.PK === stored.PK && u.Key?.SK === stored.SK ? stored : {};
+  const resolve = (path: string): unknown =>
+    path.split('.').reduce<unknown>((obj, part) => (obj == null ? undefined : (obj as Record<string, unknown>)[name(part)]), row);
+  const holds = (u.ConditionExpression ?? '').split(' AND ').every((clause) => {
+    const fn = /^attribute_(not_)?exists\((.+)\)$/.exec(clause.trim());
+    if (fn) return (resolve(fn[2] as string) === undefined) === (fn[1] !== undefined);
+    const [left, right] = clause.split(' = ').map((t) => t.trim());
+    if (left === undefined || right === undefined || !(right in values)) throw new Error(`unsupported clause ${clause}`);
+    return resolve(left) === values[right];
+  });
+  const after = structuredClone(row);
   const [setPart = '', removePart = ''] = (u.UpdateExpression ?? '').split('REMOVE');
   for (const clause of setPart.replace(/^\s*SET\s*/, '').split(',').map((c) => c.trim()).filter(Boolean)) {
-    const [left, right] = clause.split('=').map((s) => s.trim());
+    const [left, right] = clause.split('=').map((t) => t.trim());
     if (left === undefined || right === undefined || !(right in values)) throw new Error(`unsupported set ${clause}`);
-    after[resolveName(left)] = values[right];
+    after[name(left)] = values[right];
   }
-  for (const token of removePart.split(',').map((t) => t.trim()).filter(Boolean)) delete after[resolveName(token)];
-  return { holds: holds(target, u), after };
+  for (const token of removePart.split(',').map((t) => t.trim()).filter(Boolean)) delete after[name(token)];
+  return { holds, after };
 }
 
 /** The write (Update, or the first Update of a transaction) the repo sent, ignoring the read. */
@@ -194,29 +171,32 @@ describe('DriverRepo trip binding', () => {
     const u = asUpdate(extra as ExtraItem);
     const { holds: ok, after } = evalWrite(stored, u);
 
-    expect(u.ConditionExpression).toContain('tripId = :tripId');
-    // It requires the stored trip and holds for this driver's own item.
+    // The exact condition: the same trip and the cell read (a driver moved since then fails it).
+    const cell = geohash5 === undefined ? 'attribute_not_exists(geohash5)' : 'geohash5 = :gh';
+    expect(u.ConditionExpression).toBe(`attribute_exists(PK) AND tripId = :tripId AND ${cell}`);
+    expect(u.ExpressionAttributeValues).toMatchObject({ ':tripId': 't1', ...(geohash5 === undefined ? {} : { ':gh': geohash5 }) });
+    expect(evalWrite({ ...stored, geohash5: cellOf(B) }, u).holds).toBe(false);
     expect(ok).toBe(true);
     expect(after.availability).toBe('AVAILABLE');
     expect(after.tripId).toBeUndefined();
     expect(after.tripPosition).toBeUndefined();
-    if (geohash5 === undefined) {
-      expect(u.ConditionExpression).toContain('attribute_not_exists(geohash5)');
-      expect(after.GSI2PK).toBeUndefined();
-    } else {
+    if (geohash5 === undefined) expect(after.GSI2PK).toBeUndefined();
+    else {
       // Back in the availability index under its own cell (not the trip's id).
       expect(after.GSI2PK).toBe(driverGsi2(geohash5, 'd1').GSI2PK);
       expect(after.GSI2SK).toBe(driverGsi2(geohash5, 'd1').GSI2SK);
     }
   });
 
-  // Criterion 3.
-  it.each([
-    { label: 'another trip', tripId: 'other' as string | undefined, ok: false },
-    { label: 'no trip id', tripId: undefined, ok: false },
-    { label: 'the same trip', tripId: 't1', ok: true },
-  ])('a release of another trip is a 409 CONCURRENT_UPDATE', async ({ tripId, ok }) => {
-    const stored = driverRow({ availability: 'ON_TRIP', geohash5: cellOf(A), tripId });
+  // Criterion 3 (another trip, no trip id, the same trip; each with a cell and without one).
+  it.each(
+    [cellOf(A), undefined].flatMap((geohash5) => [
+      { geohash5, tripId: 'other' as string | undefined, ok: false },
+      { geohash5, tripId: undefined, ok: false },
+      { geohash5, tripId: 't1', ok: true },
+    ]),
+  )('a release of another trip is a 409 CONCURRENT_UPDATE', async ({ geohash5, tripId, ok }) => {
+    const stored = driverRow({ availability: 'ON_TRIP', geohash5, tripId });
     const { repo } = stubRepo(stored);
     const [extra] = await repo.releaseItems('d1', 't1');
     const u = asUpdate(extra as ExtraItem);
@@ -235,11 +215,16 @@ describe('DriverRepo trip binding', () => {
     { availability: 'OFFLINE' as const, withCommit: false, tripPos: false },
     { availability: 'OFFLINE' as const, withCommit: true, tripPos: false },
   ])('a position written on a trip is also stored as the trip position', async ({ availability, withCommit, tripPos }) => {
-    const stored = driverRow({ availability, position: A, geohash5: cellOf(A) });
+    const stored = driverRow({ availability, position: A, geohash5: cellOf(A), ...(tripPos ? { tripId: 't1' } : {}) });
     const { repo, sent } = stubRepo(stored);
-    const { commit } = captureCommit();
+    const { commit, seen } = captureCommit();
     await repo.setPosition('d1', B, withCommit ? commit : undefined);
-    const { after } = evalWrite(stored, writeInput(sent));
+    const { holds: ok, after } = evalWrite(stored, writeInput(sent));
+    expect(ok).toBe(true);
+    // With `commit` the write is one transaction (with the commit item) and no standalone update.
+    const writes = sent.filter((c) => !(c instanceof GetCommand));
+    expect(writes.map((c) => c instanceof TransactWriteCommand)).toEqual([withCommit]);
+    expect(seen() !== undefined).toBe(withCommit);
 
     // position and geohash5 land on B (the written point), not the one read (A).
     expect(after.position).toEqual(B);
@@ -255,6 +240,8 @@ describe('DriverRepo trip binding', () => {
     // The trip position, when written, is the written point too (not the one read).
     if (tripPos) expect(after.tripPosition).toEqual(B);
     else expect(after.tripPosition).toBeUndefined();
+    // Only while the trip read is the stored one: trip t1 released and t2 accepted in between fails it.
+    if (tripPos) expect(evalWrite({ ...stored, tripId: 't2' }, writeInput(sent)).holds).toBe(false);
   });
 
   // Criterion 5 (a stored row with both attributes, read through each method and the commit callback).

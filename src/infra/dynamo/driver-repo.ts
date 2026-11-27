@@ -332,9 +332,8 @@ export class DriverRepo {
    * Item that returns the driver to AVAILABLE when its trip completes or is cancelled, back in the
    * availability index only if it has a position. Reads the driver to know its cell; the update is
    * conditioned on that cell so a concurrent `setPosition` makes the transaction fail with 409
-   * CONCURRENT_UPDATE instead of indexing a stale cell. The update is also conditioned on the stored
-   * `tripId` being `tripId`, and clears the trip binding (`tripId`, `tripPosition`): a late or mistaken
-   * release of another trip (or of a driver with no `tripId`) fails with 409 CONCURRENT_UPDATE.
+   * CONCURRENT_UPDATE instead of indexing a stale cell, and on the stored `tripId` being `tripId` (a
+   * release of another trip, or of none, is 409 too); it clears `tripId` and `tripPosition`.
    * Returns [] for a driver without a META item.
    */
   async releaseItems(driverId: string, tripId: string): Promise<ExtraItem[]> {
@@ -414,29 +413,33 @@ export class DriverRepo {
     commit?: ResultItem<Driver>,
   ): Promise<Driver> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const current = await this.get(id);
-      if (current === null) throw driverNotFound();
+      const { Item: item } = await this.doc.send(new GetCommand({ TableName: this.tableName, Key: driverKey(id), ConsistentRead: true }));
+      if (item === undefined) throw driverNotFound();
+      const current = toDriver(item);
       const target = next(current);
       const indexed = target.availability === 'AVAILABLE' && target.geohash5 !== undefined;
 
       const set = ['#availability = :availability'];
+      let tripCondition = '';
       const values: Record<string, unknown> = { ':availability': target.availability, ':seen': current.availability };
       if (target.position !== undefined && target.geohash5 !== undefined) {
         set.push('#position = :position', 'geohash5 = :newGh');
         values[':position'] = target.position;
         values[':newGh'] = target.geohash5;
-        // A position recorded during a trip is also stored as the trip's position, so a late record
-        // can later be bound to the trip it belongs to. It never leaves the repository (see toDriver).
+        // A position written during a trip is also its trip position, only while that trip (the
+        // `tripId` read) is still the stored one: a release and another accept in between re-read.
         if (target.availability === 'ON_TRIP') {
           set.push('tripPosition = :tripPosition');
           values[':tripPosition'] = target.position;
+          tripCondition = item.tripId === undefined ? ' AND attribute_not_exists(tripId)' : ' AND tripId = :readTripId';
+          if (item.tripId !== undefined) values[':readTripId'] = item.tripId;
         }
       }
       if (indexed && target.geohash5 !== undefined) {
         set.push('GSI2PK = :gsi2pk', 'GSI2SK = :gsi2sk');
         Object.assign(values, gsi2Values(target.geohash5, id));
       }
-      let condition = 'attribute_exists(PK) AND #availability = :seen';
+      let condition = `attribute_exists(PK) AND #availability = :seen${tripCondition}`;
       if (current.geohash5 === undefined) {
         condition += ' AND attribute_not_exists(geohash5)';
       } else {
@@ -507,11 +510,9 @@ function gsi2Values(geohash5: string, driverId: string): Record<string, string> 
   return { ':gsi2pk': keys.GSI2PK, ':gsi2sk': keys.GSI2SK };
 }
 
-/** Dispatch bookkeeping kept on a driver item while it is on a trip; never part of the domain Driver. */
-const TRIP_BINDING_ATTRIBUTES: readonly string[] = ['tripId', 'tripPosition'];
-
 function toDriver(item: Record<string, unknown>): Driver {
   const driver: Record<string, unknown> = { ...item };
-  for (const key of [...KEY_ATTRIBUTES, ...TRIP_BINDING_ATTRIBUTES]) delete driver[key];
+  // The trip binding (`tripId`, `tripPosition`) is dispatch bookkeeping, never part of the domain Driver.
+  for (const key of [...KEY_ATTRIBUTES, 'tripId', 'tripPosition']) delete driver[key];
   return driver as unknown as Driver;
 }
