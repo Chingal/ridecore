@@ -302,6 +302,13 @@ describe('dispatch (DynamoDB on Floci)', () => {
     trip = await dispatch.acceptTrip(trip.id, asDriver(d), BASE);
     expect(await nearIds(origin)).toEqual([]);
 
+    // Accepting binds the driver item to the trip and carries no trip position yet.
+    expect(await rawItem(`DRIVER#${d}`, 'META')).toMatchObject({ tripId: trip.id });
+    expect(await rawItem(`DRIVER#${d}`, 'META')).not.toHaveProperty('tripPosition');
+    // A position recorded during the trip is also stored as the trip position.
+    await drivers.setPosition(d, north(origin, 0.7));
+    expect(await rawItem(`DRIVER#${d}`, 'META')).toMatchObject({ tripPosition: north(origin, 0.7) });
+
     trip = await apply(trip, { type: 'ARRIVE' }, asDriver(d));
     trip = await apply(trip, { type: 'START' }, asDriver(d));
     const done = await dispatch.finishTrip(trip.id, { type: 'COMPLETE' }, asDriver(d), BASE);
@@ -309,6 +316,9 @@ describe('dispatch (DynamoDB on Floci)', () => {
     expect(done).toMatchObject({ state: 'COMPLETED', driverId: d, version: 5 });
     expect(await trips.get(trip.id)).toEqual(done);
     expect(await drivers.get(d)).toMatchObject({ availability: 'AVAILABLE' });
+    // Completing the trip clears the binding: neither tripId nor tripPosition remains.
+    expect(await rawItem(`DRIVER#${d}`, 'META')).not.toHaveProperty('tripId');
+    expect(await rawItem(`DRIVER#${d}`, 'META')).not.toHaveProperty('tripPosition');
     expect(await nearIds(origin)).toEqual([d]);
     expect(await trips.activeTripId('DRIVER', d)).toBeNull();
     expect(await trips.activeTripId('PASSENGER', trip.passengerId)).toBeNull();
